@@ -2,7 +2,9 @@ from fastapi import FastAPI , Depends
 from typing import Annotated
 from contextlib import asynccontextmanager
 # internal package
-from .modules.order import router
+from .modules.order import router as order
+from .modules.users import router as users
+
 from .db.database import test_async_connection
 from .core import config
 
@@ -22,7 +24,9 @@ app = FastAPI(
     },
 )
 
-app.include_router(router.router, tags=["order"])
+app.include_router(order.router, tags=["order"])
+app.include_router(users.router, tags=["users"])
+
 
 @app.get("/test-connection")
 async def test_connection():

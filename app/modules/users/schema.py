@@ -7,8 +7,8 @@ from datetime import datetime
 class UserSchema(BaseModel):
     telegram_id: int = Field(
         ...,
-        ge=100000000,
-        le=999999999999999
+        ge=100,
+        le=99999999999999999999
     )
     username: Optional[str] = Field(
         None,
@@ -26,8 +26,8 @@ class UserSchema(BaseModel):
     @field_validator("telegram_id")
     @classmethod
     def validate_telegram_id(cls, v:int) -> int:
-        if v <= 0 :
-            raise ValueError("telegram_id must be greater than 0")
+        if v <= 100 :
+            raise ValueError("telegram_id must be greater ")
         return v
 
     @field_validator("name")
@@ -47,3 +47,19 @@ class UserResponseSchema(BaseModel):
     is_active: Optional[bool]
     joined_at: Optional[datetime]
     model_config = ConfigDict(from_attributes=True)
+
+
+
+from pydantic import BaseModel, Field
+from typing import Generic, TypeVar, Optional, List
+
+T = TypeVar("T")
+
+class CursorParams(BaseModel):
+    cursor: Optional[int] = Field(None, le=20000, description=" the last cursor ")
+    limit: int = Field(default=1, ge=0, le=100)
+
+class CursorResponse(BaseModel, Generic[T]):
+    items: List[T]
+    next_cursor: Optional[int]
+    has_more: bool

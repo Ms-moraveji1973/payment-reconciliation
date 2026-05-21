@@ -1,10 +1,44 @@
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional
 from datetime import datetime
-
-
+from .models import User
 
 class UserSchema(BaseModel):
+    username : str = Field(...,min_length=5 , max_length=50)
+    password: str = Field(...,min_length=8 , max_length=50)
+    name : str = Field(...,min_length=2, max_length=50)
+
+    @field_validator("username")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Username cannot be empty")
+        return v
+
+
+class UserResponseSchema(BaseModel):
+    username: str
+    name: str
+    is_active: Optional[bool]
+    joined_at: Optional[datetime]
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class TokenData(BaseModel):
+    username: str | None = None
+
+
+class UserRegisterResponseSchema(BaseModel):
+    user : UserResponseSchema
+    token : TokenResponse
+
+class UserTelegramSchema(BaseModel):
     telegram_id: int = Field(
         ...,
         ge=100,
@@ -39,7 +73,7 @@ class UserSchema(BaseModel):
         return v
 
 
-class UserResponseSchema(BaseModel):
+class UserTelegramResponseSchema(BaseModel):
     telegram_id: int
     username: Optional[str]
     name: str

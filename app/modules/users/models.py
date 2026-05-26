@@ -1,4 +1,6 @@
 from datetime import datetime
+import uuid
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import String , DateTime, Boolean, Integer, func , BigInteger , ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column , relationship
 from app.db.base import Base
@@ -20,7 +22,7 @@ class User(Base):
                                                 server_default=func.now(),
                                                 nullable=False)
     orders: Mapped[list["Order"]] = relationship("Order", back_populates="user",cascade="all, delete-orphan")
-
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship("RefreshToken",back_populates="user",cascade="all, delete-orphan")
 
 
 class RefreshToken(Base):
@@ -46,9 +48,10 @@ class RefreshToken(Base):
         nullable=False,
     )
 
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+    is_revoked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -57,4 +60,11 @@ class RefreshToken(Base):
         nullable=False,
     )
 
-    user: Mapped["User"] = relationship()
+    family_id: Mapped[uuid] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        default=uuid.uuid4,
+        index=True
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="refresh_tokens")

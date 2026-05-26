@@ -3,7 +3,7 @@ from typing import Optional
 from datetime import datetime
 from .models import User
 
-class UserSchema(BaseModel):
+class UserRegisterSchema(BaseModel):
     username : str = Field(...,min_length=5 , max_length=50)
     password: str = Field(...,min_length=8 , max_length=50)
     name : str = Field(...,min_length=2, max_length=50)
@@ -17,6 +17,7 @@ class UserSchema(BaseModel):
         return v
 
 
+
 class UserResponseSchema(BaseModel):
     username: str
     name: str
@@ -27,16 +28,15 @@ class UserResponseSchema(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token : str | None = None
 
 class TokenData(BaseModel):
     username: str | None = None
 
-
-class UserRegisterResponseSchema(BaseModel):
-    user : UserResponseSchema
-    token : TokenResponse
 
 class UserTelegramSchema(BaseModel):
     telegram_id: int = Field(

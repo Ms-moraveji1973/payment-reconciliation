@@ -1,10 +1,8 @@
-import uuid
 from typing import Annotated
-from fastapi import APIRouter, Depends, status, HTTPException, Query
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from jwt.exceptions import (DecodeError, InvalidSignatureError)
 
 from .schema import (UserTelegramSchema, UserTelegramResponseSchema,
@@ -23,7 +21,6 @@ from .service import (create_telegram_user_service,
                       get_refresh_token,
                       revoke_refresh_token,
                       revoke_family_token,
-                      revoke_all_tokens
                       )
 
 from .security import (create_access_token,
@@ -54,7 +51,7 @@ async def create_telegram_user(user : UserTelegramSchema, session : AsyncSession
 
 
 @router.post("/register",response_model=UserResponseSchema,status_code=status.HTTP_201_CREATED)
-async def register_user(user : UserRegisterSchema, session : AsyncSession = Depends(get_db)) -> UserResponseSchema :
+async def register_user(user : UserRegisterSchema, session : AsyncSession = Depends(get_db)):
     try :
         new_user = await register_user_service(user.username, user.password, user.name, session)
         await session.commit()
@@ -157,11 +154,14 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
     new_at_expires_delta = timedelta(minutes=get_settings().ACCESS_TOKEN_EXPIRE_MINUTES)
     create_new_access_token = create_access_token(data={"sub":current_username},expires_delta=new_at_expires_delta)
 
-    try :
-        await session.commit()
-        await session.refresh(create_new_rt_record)
-    except ValueError :
+    if not create_new_rt_record :
+        await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,detail="Refresh Token Conflict")
+
+
+    await session.commit()
+    await session.refresh(create_new_rt_record)
+
 
     return {"access_token": create_new_access_token, "refresh_token": create_new_rt_token, "token_type": "bearer"}
 

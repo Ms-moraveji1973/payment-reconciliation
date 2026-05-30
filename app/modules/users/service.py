@@ -61,9 +61,9 @@ async def create_refresh_token_record_service(session:AsyncSession,user_id:int, 
     session.add(refresh_token)
     try :
         await session.flush()
+        return refresh_token
     except IntegrityError:
-        raise ValueError("Refresh Token already exists")
-    return refresh_token
+        return None
 
 
 async def validate_and_revoke_refresh_token_service(session:AsyncSession,jti:str):
@@ -89,6 +89,7 @@ async def revoke_refresh_token(session:AsyncSession,jti:str):
         await session.flush()
     except IntegrityError:
         raise ValueError("Error at revoking refresh token")
+    return result
 
 
 async def revoke_family_token(session : AsyncSession, family_id : uuid.UUID):

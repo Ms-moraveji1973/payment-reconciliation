@@ -1,12 +1,14 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
-from sqlalchemy.exc import IntegrityError
-from typing import Optional
-from datetime import datetime, timedelta, timezone
 import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from .models import User , RefreshToken
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .models import RefreshToken, User
 from .schema import UserTelegramSchema
+
 
 async def create_telegram_user_service(user_data:UserTelegramSchema,session:AsyncSession) -> User:
     user = User(telegram_id=user_data.telegram_id,username=user_data.username,name=user_data.name)

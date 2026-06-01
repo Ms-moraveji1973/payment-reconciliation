@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
 from fastapi.security import OAuth2PasswordRequestForm
 from jwt.exceptions import (DecodeError, InvalidSignatureError)
+import redis.asyncio as redis
 
 from .schema import (UserTelegramSchema, UserTelegramResponseSchema,
                      UserRegisterSchema, UserResponseSchema,
@@ -32,6 +33,7 @@ from .security import (create_access_token,
                        )
 
 from .models import User
+from app.db.redis_db import get_redis, add_token_to_grace_period, token_in_grace_period
 from app.core.config import get_settings
 from app.db.database import get_db
 
@@ -79,6 +81,9 @@ async def login_user(form_data : Annotated[OAuth2PasswordRequestForm,Depends()],
     rt_expires_date = datetime.now(timezone.utc) + rt_expires_delta
     refresh_token = create_refresh_token(user.username, jti, rt_expires_delta)
     refresh_token_record = await create_refresh_token_record_service(session, user.id, jti, rt_expires_date)
+    if not refresh_token_record:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refresh token already exists")
     try :
         await session.commit()
         await session.refresh(refresh_token_record)
@@ -97,7 +102,7 @@ async def read_users_me(
 
 
 @router.post("/refresh",response_model=TokenResponse)
-async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Depends(get_db)):
+async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Depends(get_db), redis_client: redis.Redis = Depends(get_redis)):
     try :
         if rf_token.refresh_token is None :
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Refresh Token missing")
@@ -122,14 +127,20 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
         get_rt_record = await get_refresh_token(session,jti)
 
         if get_rt_record is None :
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token isn't in the database")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
         elif get_rt_record.is_revoked :
-            await revoke_family_token(session,get_rt_record.family_id)
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token is revoked")
+            result_blacklist = await token_in_grace_period(redis_client,jti)
+            if not result_blacklist :
+                await revoke_family_token(session,get_rt_record.family_id)
+                await session.commit()
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token Expired")
+            else:
+                return result_blacklist
 
         if get_rt_record.expires_at < datetime.now(timezone.utc):
             await revoke_refresh_token(session,jti)
+            await session.commit()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Refresh token expired",
@@ -142,7 +153,7 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="User not found")
     current_user_id,current_username = user.id, user.username
     if current_user_id != rt_record.user_id :
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Forbidden")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Invalid token")
 
     # create new refresh token
     new_jti = generate_refresh_token_string()
@@ -153,7 +164,6 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
     # create new access token
     new_at_expires_delta = timedelta(minutes=get_settings().ACCESS_TOKEN_EXPIRE_MINUTES)
     create_new_access_token = create_access_token(data={"sub":current_username},expires_delta=new_at_expires_delta)
-
     if not create_new_rt_record :
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,detail="Refresh Token Conflict")
@@ -161,6 +171,8 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
 
     await session.commit()
     await session.refresh(create_new_rt_record)
+    await add_token_to_grace_period(redis_client, jti, create_new_access_token, create_new_rt_token)
+
 
 
     return {"access_token": create_new_access_token, "refresh_token": create_new_rt_token, "token_type": "bearer"}

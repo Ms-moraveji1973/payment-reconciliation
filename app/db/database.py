@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession )
 
 from ..core.config import get_settings
-
+config = get_settings()
 def get_database():
     setting = get_settings()
     return setting.DATABASE_URL
@@ -34,8 +34,12 @@ async def test_async_connection() -> bool:
         async with engine.connect() as conn:
             result = await conn.execute(text("SELECT 1"))
             value = result.scalar()
-            print(f"✅ Database connection test passed (result: {value})")
+            print(f" database connection test passed (result: {value})")
+
             return True
     except Exception as e:
-        print(f"❌ Database connection test failed: {e}")
+        print("--- DEBUG CONFIG ---")
+        print(f"Postgres Host: {config.DATABASE_URL}")
+        print(f"Redis Host: {config.REDIS_HOST}")
+        print(f" database connection test failed: {e}")
         return False

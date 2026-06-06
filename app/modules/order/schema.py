@@ -4,14 +4,23 @@ from datetime import datetime
 from .models import OrderStatus
 
 class OrderSchema(BaseModel):
-    telegram_id : int
-    amount : float = Field(..., gt=0,description="The amount of the order must be grater than 0 :")
+    amount : int = Field(..., gt=0,description="The amount of the order must be grater than 0 :")
 
+
+class PaymentIntentResponseSchema(BaseModel):
+    id: int
+    status: OrderStatus
+    base_amount: int
+    exact_amount: int
+    created_at: datetime
+    expired_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
 class OrderResponseSchema(BaseModel):
     id : int
     user_id : int
-    amount : float
+    amount : int
     status : OrderStatus
     created_at : datetime
+    payment_intent: PaymentIntentResponseSchema | None = None
     model_config = ConfigDict(from_attributes=True)

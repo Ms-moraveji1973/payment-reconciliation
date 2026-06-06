@@ -13,7 +13,7 @@ def get_database():
     return setting.DATABASE_URL
 
 DATABASE_URL= get_database()
-engine = create_async_engine(DATABASE_URL,echo=False,pool_pre_ping=True)
+engine = create_async_engine(DATABASE_URL,echo=False,pool_pre_ping=True,pool_size=50)
 
 SessionLocal = async_sessionmaker(bind=engine,class_=AsyncSession,expire_on_commit=False)
 

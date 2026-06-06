@@ -7,15 +7,26 @@ import redis.asyncio as redis
 from .modules.order import router as order
 from .modules.users import router as users
 
-from .db.database import test_async_connection
-from .db.redis_db import test_async_redis_connection
+from .db.database import test_async_connection, SessionLocal
+from .db.redis_db import test_async_redis_connection, AmountSeeder
 from .core.config import get_settings
+from .modules.order.service import get_all_pending_orders
 
 config = get_settings()
 
 @asynccontextmanager
 async def lifespan(app : FastAPI):
-    app.state.redis = redis.Redis(host=config.REDIS_HOST,port=config.REDIS_PORT,db=0)
+    app.state.redis = redis.Redis(host=config.REDIS_HOST,port=config.REDIS_PORT,db=0, decode_responses=True)
+    amount_seeder = AmountSeeder(app.state.redis)
+    await amount_seeder.is_exist_range_amount(1500000, 1550000)
+    async with SessionLocal() as session:
+        await app.state.redis.delete("pending_orders")
+        async for orders in get_all_pending_orders(session):
+            if orders :
+                orders_amount = [order.exact_amount for order in orders]
+                await app.state.redis.sadd("pending_orders",*orders_amount)
+    await app.state.redis.sdiffstore('free_amounts',['amounts','pending_orders'])
+
     yield
     await app.state.redis.aclose()
 

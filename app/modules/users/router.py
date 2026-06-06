@@ -57,8 +57,7 @@ async def register_user(user : UserRegisterSchema, session : AsyncSession = Depe
     try :
         new_user = await register_user_service(user.username, user.password, user.name, session)
         await session.commit()
-        await session.refresh(new_user)
-        return user
+        return new_user
     except ValueError :
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
@@ -86,7 +85,6 @@ async def login_user(form_data : Annotated[OAuth2PasswordRequestForm,Depends()],
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refresh token already exists")
     try :
         await session.commit()
-        await session.refresh(refresh_token_record)
     except ValueError :
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refresh token already exists")

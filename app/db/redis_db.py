@@ -3,7 +3,6 @@ import redis.asyncio as redis
 from fastapi import Request
 from app.core.config import get_settings
 
-
 config = get_settings()
 
 async def get_redis(request: Request):
@@ -22,6 +21,23 @@ async def token_in_grace_period(redis_client: redis.Redis, jti: str):
     if result :
         return json.loads(result)
     return None
+
+
+class AmountSeeder:
+    all_amount_key = "amounts"
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+
+    async def is_exist_range_amount(self, start:int, end:int, batch: int = 10000):
+        if await self.redis.exists(self.all_amount_key):
+            print("--------- It's already existed ---------")
+            return
+        print('----------- created new amount range set ------------')
+        amount_range = [str(i) for i in range(start, end+1)]
+        for i in range(0, len(amount_range), batch):
+            batch_range = amount_range[i: i+batch]
+            await self.redis.sadd(self.all_amount_key, *batch_range)
+
 
 
 

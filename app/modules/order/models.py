@@ -41,7 +41,7 @@ class PaymentIntent(Base):
     order_id : Mapped[int] = mapped_column(ForeignKey("orders.id"),nullable=False,index=True)
     status : Mapped[int] = mapped_column(sqlalchemyEnum(OrderStatus))
     base_amount : Mapped[int] = mapped_column(Integer, nullable=False)
-    exact_amount : Mapped[int] = mapped_column(Integer, unique=True)
+    exact_amount : Mapped[int] = mapped_column(Integer)
     created_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=func.now(),
                                                 nullable=False)
     expired_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=text("CURRENT_TIMESTAMP + INTERVAL '1 day'"),

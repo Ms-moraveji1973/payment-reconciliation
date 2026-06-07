@@ -4,8 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
-
+import random
 # internal
 from .models import Order, PaymentIntent, OrderStatus
 from app.modules.users.models import User
@@ -24,7 +25,8 @@ async def create_order_service(user:User, amount:int, session: AsyncSession, red
             await session.flush()
             return new_order
         except IntegrityError :
-            raise ValueError("Something has been occurred")
+            await redis_client.smove("pending_orders","amounts",unique_amount)
+            raise ValueError("Duplicate unique amount")
     except Exception:
         await redis_client.smove("pending_orders","amounts",unique_amount)
         raise ValueError("Database error occurred ")
@@ -70,8 +72,29 @@ async def get_all_pending_orders(session:AsyncSession, limit: int = 100):
 
 
 async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
-    given_amount = await redis_client.spop('free_amounts')
-    if given_amount :
-        await redis_client.smove("amounts",'pending_orders',given_amount)
-        return int(given_amount)
+    try:
+        given_amount = await redis_client.spop('free_amounts')
+        if given_amount :
+            await redis_client.smove("amounts",'pending_orders',given_amount)
+            return int(given_amount)
+    except RedisError :
+        fallback_amount = await get_unique_amount_from_postgres(session)
+        print("------------- fallback is called ------------")
+        return fallback_amount
     return None
+
+
+
+async def get_unique_amount_from_postgres(session: AsyncSession):
+    pending_orders = set()
+    async for orders in get_all_pending_orders(session) :
+        for order in orders:
+            pending_orders.add(order.exact_amount)
+    possible_range = set(range(min(pending_orders), max(pending_orders)+200))
+    available_amounts = list(possible_range - pending_orders)
+    unique_amount = random.choice(available_amounts)
+    if unique_amount:
+        print("--------------------- unique amount from postgres is :", unique_amount)
+        return unique_amount
+    return None
+

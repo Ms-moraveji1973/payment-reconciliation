@@ -2,6 +2,7 @@ from fastapi import FastAPI , Depends
 from typing import Annotated
 from contextlib import asynccontextmanager
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 # internal package
 from .modules.order import router as order
@@ -21,14 +22,24 @@ async def lifespan(app : FastAPI):
     await amount_seeder.is_exist_range_amount(1500000, 1550000)
     async with SessionLocal() as session:
         await app.state.redis.delete("pending_orders")
+        REDIS_BUFFER = 1000
+        buffer = []
         async for orders in get_all_pending_orders(session):
             if orders :
                 orders_amount = [order.exact_amount for order in orders]
-                await app.state.redis.sadd("pending_orders",*orders_amount)
+                buffer.extend(orders_amount)
+                if len(buffer) >= REDIS_BUFFER:
+                    await app.state.redis.sadd("pending_orders",*buffer)
+                    buffer.clear()
+        if buffer:
+            await app.state.redis.sadd("pending_orders",*buffer)
+            buffer.clear()
+
     await app.state.redis.sdiffstore('free_amounts',['amounts','pending_orders'])
 
     yield
     await app.state.redis.aclose()
+
 
 
 

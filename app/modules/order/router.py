@@ -21,15 +21,18 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 @router.post("/create-order",response_model=OrderResponseSchema ,status_code=status.HTTP_201_CREATED)
 async def create_order(order_data:OrderSchema, current_user: Annotated[User, Depends(get_current_user)], session:AsyncSession = Depends(get_db), redis_client: redis.Redis = Depends(get_redis)):
-    create_order = await create_order_service(current_user, order_data.amount, session, redis_client)
     try :
+        create_order = await create_order_service(current_user, order_data.amount, session, redis_client)
+        if not create_order :
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No free amount is available ")
+
         await session.commit()
         await session.refresh(create_order, attribute_names=['payment_intent'])
         return create_order
 
     except ValueError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Something has been occurred")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Duplicate unique amount")
 
     except Exception :
         await session.rollback()

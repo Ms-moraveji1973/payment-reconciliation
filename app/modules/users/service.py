@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ async def get_user_by_telegram_id(telegram_id:int,session:AsyncSession) -> User 
 
 async def register_user_service(username:str, password:str, name:str, session:AsyncSession) -> User:
     from .security import hash_password
-    hashed_password = hash_password(password)
+    hashed_password = await run_in_threadpool(hash_password,password)
     new_user = User(username=username,hashed_password=hashed_password,name=name)
     session.add(new_user)
     try :

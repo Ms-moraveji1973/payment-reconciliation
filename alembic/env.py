@@ -12,7 +12,7 @@ from app.db.base import Base
 
 # import model
 from app.modules.users.models import User
-from app.modules.order.models import Order
+from app.modules.order.models import Order, PaymentIntent
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

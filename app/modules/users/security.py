@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
 from passlib.context import CryptContext
 from pydantic.v1.schema import schema
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 import secrets
 
@@ -34,7 +35,7 @@ async def authenticate_user(session,username:str,password:str):
     user = await get_user_by_username(username,session)
     if not user:
         return False
-    if not verify_password(password,user.hashed_password) :
+    if not await run_in_threadpool(verify_password, password, user.hashed_password) :
         return False
     return user
 

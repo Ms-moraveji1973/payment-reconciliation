@@ -15,6 +15,12 @@ from app.modules.users.models import User
 async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
     unique_amount = await get_unique_amount(session, redis_client)
     print("-------------- unique amount equals : ", unique_amount)
+    if not unique_amount :
+        amounts_count = await redis_client.scard("amounts")
+        free_amounts_count = await redis_client.scard("free_amounts")
+        print(f"--------------------- amounts count: {amounts_count}")
+        print(f"--------------------- free_amounts count: {free_amounts_count}")
+        return None
     try:
         new_order = Order(user_id=user.id, amount=amount,
                         payment_intent=PaymentIntent(status=OrderStatus.PENDING,

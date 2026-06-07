@@ -29,7 +29,8 @@ async def create_order(order_data:OrderSchema, current_user: Annotated[User, Dep
         await session.commit()
         await session.refresh(create_order, attribute_names=['payment_intent'])
         return create_order
-
+    except HTTPException:
+        raise
     except ValueError:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Duplicate unique amount")

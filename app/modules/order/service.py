@@ -7,8 +7,9 @@ import redis.asyncio as redis
 from redis.exceptions import RedisError
 from sqlalchemy import select
 import random
+import re
 # internal
-from .models import Order, PaymentIntent, OrderStatus
+from .models import Order, PaymentIntent, OrderStatus, SMSTransaction
 from app.modules.users.models import User
 
 
@@ -32,9 +33,11 @@ async def create_order_service(user:User, amount:int, session: AsyncSession, red
             return new_order
         except IntegrityError :
             await redis_client.smove("pending_orders","amounts",unique_amount)
+            await redis_client.sadd("free_amounts",unique_amount)
             raise ValueError("Duplicate unique amount")
     except Exception:
         await redis_client.smove("pending_orders","amounts",unique_amount)
+        await redis_client.sadd("free_amounts",unique_amount)
         raise ValueError("Database error occurred ")
 
 
@@ -104,3 +107,49 @@ async def get_unique_amount_from_postgres(session: AsyncSession):
         return unique_amount
     return None
 
+
+async def create_transaction_service(sms_data: dict, session:AsyncSession):
+    amount = sms_data["sms_amount"]
+    inventory = sms_data["sms_inventory"]
+    date = sms_data["sms_date"]
+    time = sms_data["sms_time"]
+    webhook_payload = sms_data["webhook_payload"]
+    if None in (amount, inventory, date, time, webhook_payload):
+        raise ValueError("error_missing_fields")
+    new_transaction = SMSTransaction(sms_amount=amount, sms_inventory=inventory, sms_date=date, sms_time=time, webhook_payload=webhook_payload)
+    session.add(new_transaction)
+    try:
+        await session.flush()
+        return new_transaction
+    except IntegrityError:
+        raise ValueError("error_duplicate_transaction")
+
+
+
+
+
+def parse_sms_transaction(content: str):
+    persian_to_eng = str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789')
+    clean_text = content.translate(persian_to_eng)
+    pattern = (
+        r"(?P<amount>[\d,]+)\s*ریال به حساب شما نشست\..*?"
+        r"موجودی:\s*(?P<inventory>[\d,]+)\s*ریال.*?"
+        r"(?P<time>\d{2}:\d{2}).*?"
+        r"(?P<date>\d{4}\.\d{2}\.\d{2})"
+    )
+    match = re.search(pattern, clean_text, re.DOTALL)
+    if not match:
+        return None
+    data = match.groupdict()
+    amount = int(data['amount'].replace(',', ''))
+    inventory = int(data['inventory'].replace(',', ''))
+    raw_time = data['time']
+    raw_date = data['date']
+
+    return {
+        "sms_amount": amount,
+        "sms_inventory": inventory,
+        "sms_date": raw_date,
+        "sms_time": raw_time,
+        "webhook_payload": content
+    }

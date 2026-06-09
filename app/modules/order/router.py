@@ -3,18 +3,27 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as redis
+from fastapi.concurrency import run_in_threadpool
+
 # internal
 from app.db.database import get_db
 from app.modules.users.models import User
 from app.modules.users.security import get_current_user
 from app.db.redis_db import get_redis
 
-from .schema import OrderResponseSchema, OrderSchema
+from .schema import (OrderResponseSchema,
+                        OrderSchema,
+                        SmsWebhookPayload,
+                        SmsWebhookPayloadResponse,
+                    )
+
 from .service import (
     create_order_service,
     delete_order_service,
     get_all_orders,
     get_order_service,
+    parse_sms_transaction,
+    create_transaction_service,
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -67,3 +76,32 @@ async def delete_order(current_user: Annotated[User, Depends(get_current_user)],
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail="Order not found")
     return None
+
+
+
+@router.post("/transaction", response_model=SmsWebhookPayloadResponse, status_code=status.HTTP_200_OK)
+async def receive_transaction(sms_transaction:SmsWebhookPayload, session:AsyncSession = Depends(get_db)):
+    content = sms_transaction.content
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The content is required")
+    sms_data = await run_in_threadpool(parse_sms_transaction,content)
+    if not sms_data :
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The sms format isn't valid")
+    try:
+        create_transaction = await create_transaction_service(sms_data, session)
+        await session.commit()
+        return create_transaction
+    except ValueError as v:
+        await session.rollback()
+        error_message = str(v)
+        if error_message == "":
+            return {
+                "status": "ignored",
+                "message": "The transaction already exists (Idempotent request)"
+            }
+
+        elif error_message == "error_missing_fields" :
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
+
+        else:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")

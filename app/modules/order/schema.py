@@ -24,3 +24,16 @@ class OrderResponseSchema(BaseModel):
     created_at : datetime
     payment_intent: PaymentIntentResponseSchema | None = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class SmsWebhookPayload(BaseModel):
+    from_number : str
+    content : str
+    timestamp : int
+
+
+
+class SmsWebhookPayloadResponse(BaseModel):
+    sms_amount : int
+    sms_date : str
+    sms_time : str

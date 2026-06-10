@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Annotated
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, MultipleResultsFound, NoResultFound
 from sqlalchemy.orm import joinedload
 import redis.asyncio as redis
 from redis.exceptions import RedisError
@@ -83,6 +83,7 @@ async def get_all_pending_orders(session:AsyncSession, limit: int = 100):
 async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
     try:
         given_amount = await redis_client.spop('free_amounts')
+        print(f"-------- {given_amount} was taken from free_amounts")
         if given_amount :
             await redis_client.smove("amounts",'pending_orders',given_amount)
             return int(given_amount)
@@ -108,6 +109,25 @@ async def get_unique_amount_from_postgres(session: AsyncSession):
     return None
 
 
+
+async def process_pending_payment(amount:int, session: AsyncSession):
+    stmt = select(PaymentIntent).with_for_update(nowait=False).options(joinedload(PaymentIntent.order, innerjoin=True)).where(PaymentIntent.exact_amount == amount, PaymentIntent.status == OrderStatus.PENDING)
+    payment_result = await session.execute(stmt)
+    try:
+        payment = payment_result.scalar_one()
+        payment.status = OrderStatus.PAID
+        payment.order.status = OrderStatus.PAID
+        await session.flush()
+        print("---------------- the transaction amount has been found and changed the status to PAID ----------")
+        return payment
+
+    except NoResultFound:
+        raise ValueError("NoResultFound")
+
+    except MultipleResultsFound:
+        raise ValueError("MultipleResultsFound")
+
+
 async def create_transaction_service(sms_data: dict, session:AsyncSession):
     amount = sms_data["sms_amount"]
     inventory = sms_data["sms_inventory"]
@@ -123,6 +143,17 @@ async def create_transaction_service(sms_data: dict, session:AsyncSession):
         return new_transaction
     except IntegrityError:
         raise ValueError("error_duplicate_transaction")
+
+
+async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis_client: redis.Redis):
+    transaction = await create_transaction_service(sms_data, session)
+    await session.commit()
+    amount = transaction.sms_amount
+    get_pending_payment = await process_pending_payment(amount, session)
+    await session.commit()
+    await redis_client.smove("pending_orders","free_amounts",str(amount))
+    print(f"------------- {amount} was moved to free_amount --------------- ")
+    return get_pending_payment
 
 
 

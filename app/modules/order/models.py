@@ -41,9 +41,9 @@ class PaymentIntent(Base):
     __tablename__ = "payment_intent"
     id : Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id : Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"),nullable=False,index=True)
-    status : Mapped[int] = mapped_column(sqlalchemyEnum(OrderStatus))
+    status : Mapped[Enum] = mapped_column(sqlalchemyEnum(OrderStatus),index=True)
     base_amount : Mapped[int] = mapped_column(Integer, nullable=False)
-    exact_amount : Mapped[int] = mapped_column(Integer)
+    exact_amount : Mapped[int] = mapped_column(Integer, index=True)
     created_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=func.now(),
                                                 nullable=False)
     expired_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=text("CURRENT_TIMESTAMP + INTERVAL '1 day'"),

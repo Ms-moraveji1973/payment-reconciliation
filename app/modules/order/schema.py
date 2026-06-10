@@ -32,8 +32,15 @@ class SmsWebhookPayload(BaseModel):
     timestamp : int
 
 
+class OrderPaymentResponse(BaseModel):
+    id : int
+    user_id : int
+    status : OrderStatus
+    model_config = ConfigDict(from_attributes=True)
 
 class SmsWebhookPayloadResponse(BaseModel):
-    sms_amount : int
-    sms_date : str
-    sms_time : str
+    status : OrderStatus
+    exact_amount : int
+    order_id : int
+    order : OrderPaymentResponse
+    model_config = ConfigDict(from_attributes=True)

@@ -18,6 +18,7 @@ config = get_settings()
 @asynccontextmanager
 async def lifespan(app : FastAPI):
     app.state.redis = redis.Redis(host=config.REDIS_HOST,port=config.REDIS_PORT,db=0, decode_responses=True)
+    # await app.state.redis.delete('amounts')
     amount_seeder = AmountSeeder(app.state.redis)
     await amount_seeder.is_exist_range_amount(1500000, 1550000)
     async with SessionLocal() as session:

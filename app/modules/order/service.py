@@ -11,6 +11,7 @@ import re
 # internal
 from .models import Order, PaymentIntent, OrderStatus, SMSTransaction
 from app.modules.users.models import User
+from .queue_manager import MessageQueue
 
 
 async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
@@ -149,11 +150,19 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
     transaction = await create_transaction_service(sms_data, session)
     await session.commit()
     amount = transaction.sms_amount
-    get_pending_payment = await process_pending_payment(amount, session)
-    await session.commit()
-    await redis_client.smove("pending_orders","free_amounts",str(amount))
+    transaction_id = transaction.id
+    transaction_amount = {"amount":amount}
+    process_pending_queue = MessageQueue(redis_client, stream_name="pending_orders_queue")
+    message_id = await process_pending_queue.enqueue(transaction_amount)
+    #get_pending_payment = await process_pending_payment(amount, session)
+    #await session.commit()
     print(f"------------- {amount} was moved to free_amount --------------- ")
-    return get_pending_payment
+    #return get_pending_payment
+    return {
+        "status" : "accepted",
+        "redis_message_id" : message_id,
+        "transaction_id":transaction_id
+    }
 
 
 

@@ -96,15 +96,16 @@ async def receive_transaction(sms_transaction:SmsWebhookPayload, session:AsyncSe
         if error_message == "error_duplicate_transaction":
             raise HTTPException(status_code=status.HTTP_200_OK, detail="The transaction data is already exists")
 
-
         elif error_message == "error_missing_fields":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
 
-        elif error_message == "NoResultFound":
+        else:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+
+
+"""        elif error_message == "NoResultFound":
             raise HTTPException(status_code=status.HTTP_204_NO_CONTENT, detail="No transaction amount matched")
 
         elif error_message == "MultipleResultsFound":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There are the same amounts in DB")
-
-        else:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+"""

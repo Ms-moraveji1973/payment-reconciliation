@@ -39,8 +39,6 @@ class OrderPaymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class SmsWebhookPayloadResponse(BaseModel):
-    status : OrderStatus
-    exact_amount : int
-    order_id : int
-    order : OrderPaymentResponse
-    model_config = ConfigDict(from_attributes=True)
+    status : str
+    redis_message_id: str
+    transaction_id : int

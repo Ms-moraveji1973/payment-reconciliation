@@ -10,7 +10,7 @@ from app.db.database import get_db
 from app.modules.users.models import User
 from app.modules.users.security import get_current_user
 from app.db.redis_db import get_redis
-
+from app.core.logger import log
 from .schema import (OrderResponseSchema,
                         OrderSchema,
                         SmsWebhookPayload,
@@ -81,11 +81,14 @@ async def delete_order(current_user: Annotated[User, Depends(get_current_user)],
 
 @router.post("/transaction", response_model=SmsWebhookPayloadResponse, status_code=status.HTTP_200_OK)
 async def receive_transaction(sms_transaction:SmsWebhookPayload, session:AsyncSession = Depends(get_db), redis_client: redis.Redis = Depends(get_redis)):
+    request_log = log.bind(payload=sms_transaction.model_dump())
+    request_log.info("transaction")
     content = sms_transaction.content
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The content is required")
     sms_data = await run_in_threadpool(parse_sms_transaction,content)
     if not sms_data :
+        request_log.warning("missing_content")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The sms format isn't valid")
     try:
         result = await handle_transaction_service(sms_data, session, redis_client)
@@ -94,17 +97,21 @@ async def receive_transaction(sms_transaction:SmsWebhookPayload, session:AsyncSe
         await session.rollback()
         error_message = str(v)
         if error_message == "error_duplicate_transaction":
-            raise HTTPException(status_code=status.HTTP_200_OK, detail="The transaction data is already exists")
-
+            return {
+                    "status": "already_exists",
+                    "detail": "The transaction data already exists"
+        }
 
         elif error_message == "error_missing_fields":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
 
-        elif error_message == "NoResultFound":
+        else:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+
+
+"""        elif error_message == "NoResultFound":
             raise HTTPException(status_code=status.HTTP_204_NO_CONTENT, detail="No transaction amount matched")
 
         elif error_message == "MultipleResultsFound":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There are the same amounts in DB")
-
-        else:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+"""

@@ -121,7 +121,7 @@ async def process_pending_payment(amount:int, session: AsyncSession):
         payment.status = OrderStatus.PAID
         payment.order.status = OrderStatus.PAID
         await session.flush()
-        log.info("the transaction amount has been found and changed the status to PAID ")
+        log.info("the transaction amount has been found and changed the status to PAID",status="transaction_found")
         return payment
 
     except NoResultFound:

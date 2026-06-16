@@ -8,20 +8,22 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 import random
 import re
+import uuid
 # internal
 from .models import Order, PaymentIntent, OrderStatus, SMSTransaction
 from app.modules.users.models import User
+from app.core.logger import log
 from .queue_manager import MessageQueue
 
 
 async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
     unique_amount = await get_unique_amount(session, redis_client)
-    print("-------------- unique amount equals : ", unique_amount)
+    log.info(f"unique amount equals : {unique_amount}")
     if not unique_amount :
         amounts_count = await redis_client.scard("amounts")
         free_amounts_count = await redis_client.scard("free_amounts")
-        print(f"--------------------- amounts count: {amounts_count}")
-        print(f"--------------------- free_amounts count: {free_amounts_count}")
+        log.info(f"amounts count: {amounts_count}")
+        log.info(f" free_amounts count: {free_amounts_count}")
         return None
     try:
         new_order = Order(user_id=user.id, amount=amount,
@@ -84,13 +86,13 @@ async def get_all_pending_orders(session:AsyncSession, limit: int = 100):
 async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
     try:
         given_amount = await redis_client.spop('free_amounts')
-        print(f"-------- {given_amount} was taken from free_amounts")
+        log.info(f"{given_amount} was taken from free_amounts")
         if given_amount :
             await redis_client.smove("amounts",'pending_orders',given_amount)
             return int(given_amount)
     except RedisError :
         fallback_amount = await get_unique_amount_from_postgres(session)
-        print("------------- fallback is called ------------")
+        log.warning("fallback is called ")
         return fallback_amount
     return None
 
@@ -105,7 +107,7 @@ async def get_unique_amount_from_postgres(session: AsyncSession):
     available_amounts = list(possible_range - pending_orders)
     unique_amount = random.choice(available_amounts)
     if unique_amount:
-        print("--------------------- unique amount from postgres is :", unique_amount)
+        log.info(f"unique amount from postgres is : {unique_amount}")
         return unique_amount
     return None
 
@@ -119,7 +121,7 @@ async def process_pending_payment(amount:int, session: AsyncSession):
         payment.status = OrderStatus.PAID
         payment.order.status = OrderStatus.PAID
         await session.flush()
-        print("---------------- the transaction amount has been found and changed the status to PAID ----------")
+        log.info("the transaction amount has been found and changed the status to PAID ")
         return payment
 
     except NoResultFound:
@@ -150,14 +152,15 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
     transaction = await create_transaction_service(sms_data, session)
     await session.commit()
     amount = transaction.sms_amount
+    trace_id = sms_data["trace_id"]
     transaction_id = transaction.id
-    transaction_amount = {"amount":amount}
+    transaction_data = {
+        "trace_id":trace_id,
+        "amount":amount,
+        "type":"payment"
+        }
     process_pending_queue = MessageQueue(redis_client, stream_name="pending_orders_queue")
-    message_id = await process_pending_queue.enqueue(transaction_amount)
-    #get_pending_payment = await process_pending_payment(amount, session)
-    #await session.commit()
-    print(f"------------- {amount} was moved to free_amount --------------- ")
-    #return get_pending_payment
+    message_id = await process_pending_queue.enqueue(transaction_data)
     return {
         "status" : "accepted",
         "redis_message_id" : message_id,
@@ -185,8 +188,10 @@ def parse_sms_transaction(content: str):
     inventory = int(data['inventory'].replace(',', ''))
     raw_time = data['time']
     raw_date = data['date']
+    trace_id = f"tx_{uuid.uuid4().hex[:12]}"
 
     return {
+        "trace_id":trace_id,
         "sms_amount": amount,
         "sms_inventory": inventory,
         "sms_date": raw_date,

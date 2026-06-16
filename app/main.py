@@ -2,7 +2,6 @@ from fastapi import FastAPI , Depends
 from typing import Annotated
 from contextlib import asynccontextmanager
 import redis.asyncio as redis
-from redis.exceptions import RedisError
 
 # internal package
 from .modules.order import router as order
@@ -12,6 +11,8 @@ from .db.database import test_async_connection, SessionLocal
 from .db.redis_db import test_async_redis_connection, AmountSeeder
 from .core.config import get_settings
 from .modules.order.service import get_all_pending_orders
+from .core.logger import setup_logger
+setup_logger()
 
 config = get_settings()
 

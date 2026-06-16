@@ -1,14 +1,9 @@
 import redis.asyncio as redis
 import json
 import time
-import logging
 import uuid
-from dataclasses import dataclass, asdict
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
+from dataclasses import dataclass
+from app.core.logger import log as logger
 
 @dataclass
 class Message:
@@ -31,6 +26,7 @@ class MessageQueue:
         self.redis = redis_client
         self.stream_name = stream_name
         self.max_len = max_len
+        self.dead_letter_stream = f"{self.stream_name}:dead"
 
     async def enqueue(self, data:dict):
         payload = {
@@ -39,7 +35,7 @@ class MessageQueue:
             "attempts" : "0"
         }
         msg_id = await self.redis.xadd(self.stream_name, payload, id="*", maxlen=self.max_len, approximate=True)
-        logging.info(f"Enqueued message: {msg_id}")
+        logger.info(f"Enqueued message: {msg_id}")
         return msg_id
 
 
@@ -53,9 +49,9 @@ class ConsumerGroup:
 
     @classmethod
     async def create(cls, queue:MessageQueue, group_name: str, consumer_name: str):
-        self = cls(queue, group_name, consumer_name)
-        await self._ensure_group()
-        return self
+        instance = cls(queue, group_name, consumer_name)
+        await instance._ensure_group()
+        return instance
 
     async def _ensure_group(self):
         try:
@@ -70,7 +66,7 @@ class ConsumerGroup:
         except redis.ResponseError as e:
             if 'BUSYGROUP' not in str(e):
                 raise
-            logger.debug(f"Consumer group already exists: {self.group_name}")
+            logger.info(f"Consumer group already exists: {self.group_name}")
 
 
     async def read_messages(self, count:int = 10, block_ms:int = 5000):
@@ -102,7 +98,7 @@ class ConsumerGroup:
     async def acknowledge(self, message_id: int) -> int :
         result = await self.redis.xack(self.stream_name, self.group_name, message_id)
         if result:
-            logger.debug(f"Acknowledged: {message_id}")
+            logger.info(f"Acknowledged: {message_id}")
         return result > 0
 
 
@@ -110,3 +106,40 @@ class ConsumerGroup:
         if not message_ids:
             return 0
         return await self.redis.xack(self.stream_name, self.group_name, *message_ids)
+
+
+    async def get_pending(self, count: int = 100):
+        pending = await self.redis.xpending_range(self.stream_name, self.group_name, "-", "+", count=count)
+        return pending
+
+    async def get_pending_summary(self):
+        info = await self.redis.xpending(self.stream_name, self.group_name)
+        return {
+            'count': info['pending'],
+            'min_id': info['min'],
+            'max_id': info['max'],
+            'by_consumer': info['consumers']
+        }
+
+
+    async def claim_stale_message(self, min_idle_time=6000, count: int = 10):
+        pending = await self.redis.xpending_range(self.stream_name, self.group_name, "-", "+", count=count)
+        claimed = []
+        for entry in pending:
+            if entry["time_since_delivered"] >= min_idle_time:
+                real_delivery_count = entry['times_delivered']
+                result = await self.redis.xclaim(self.stream_name, self.group_name,
+                                                self.consumer_name, min_idle_time,
+                                                [entry['message_id']])
+                for msg_id, fields in result:
+                    claimed.append(Message(
+                        id=msg_id,
+                        stream=self.stream_name,
+                        data=json.loads(fields.get('data', '{}')),
+                        attempts=real_delivery_count,
+                        created_at=float(fields.get('created_at', time.time()))
+                    ))
+        if claimed:
+            logger.info(f" Claimed {len(claimed)} stale message")
+
+        return claimed

@@ -61,11 +61,9 @@ graph TD
 
 ## 💡 How It Works (The Core Logic)
 
-In regions or scenarios where direct digital payment gateways are restrictive or unavailable, businesses often rely on manual peer-to-peer card transfers.
-
-This creates a fundamental problem:
-
-> How can a system reliably determine which user made a specific payment without requiring receipts or manual verification?
+When traditional digital payment gateways are unavailable or impractical, businesses often rely on manual peer-to-peer card transfers. 
+  
+The primary challenge here is reliably identifying which user made a specific payment without manual receipt verification or automated bank webhooks.
 
 ### The Solution: Unique Amount Mapping
 
@@ -84,7 +82,7 @@ All of this happens automatically without requiring human review.
 
 ---
 
-## 🛠️ Core Engineering Pillars
+## 🛠️ Core Implementation Details
 
 ### 1. High-Concurrency & Race Condition Prevention
 
@@ -143,7 +141,7 @@ These mechanisms ensure transactions are processed reliably even when workers fa
 
 ---
 
-### 4. Structured Observability
+### 4. Structured Logging
 
 Structured JSON logging is implemented using Structlog.
 
@@ -151,14 +149,109 @@ Each transaction receives a unique `trace_id` which propagates through API reque
 
 ---
 
+### 5. Authentication & Session Management
+
+In addition to payment processing, the system includes a complete authentication and session management layer designed to support long-lived user sessions while maintaining strong security guarantees.
+
+The core challenge is maintaining seamless, long-lived sessions without exposing the system to token theft, replay attacks, or state inconsistencies. This is solved via JWT rotation, token families, and Redis-backed session recovery.
+
+---
+
+#### Authentication Layer
+
+The API implements standard JWT-based authentication using short-lived Access Tokens and long-lived Refresh Tokens. User credentials are securely stored using BCrypt password hashing, and protected endpoints resolve identities through OAuth2 Bearer tokens.
+
+---
+
+#### Refresh Token Rotation
+
+To ensure refresh tokens remain strictly single-use, every refresh operation invalidates the previous token and issues a completely new pair. This significantly mitigates the risk and impact of token leakage.
+
+```text
+┌──────────────┐
+│ Refresh RT1  │
+└──────┬───────┘
+       │
+       ▼
+   [ Revoked ]
+       │
+       ▼
+┌──────────────┐
+│ Refresh RT2  │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│ Access AT2   │
+└──────────────┘
+```
+
+---
+
+#### Replay Attack Detection
+
+Refresh tokens are tracked within unique "token families." If a previously revoked token is reused, the system detects a potential replay attack and immediately invalidates the entire family, preventing unauthorized session extensions.
+
+```text
+Token Family A
+
+RT1 ───▶ RT2 ───▶ RT3
+ │
+ │ Reused after revocation
+ ▼
+⚠ Potential Replay Attack
+
+RT1 ✖
+RT2 ✖
+RT3 ✖
+```
+
+---
+
+#### Grace Period & Race Condition Handling
+
+> Handles concurrent refresh requests or network retries securely without breaking the session flow.
+
+- Rotated token pairs are temporarily cached in Redis during a short grace period.
+- Legitimate retry requests (due to network instability) receive the same token pair instead of triggering a false replay attack alarm.
+- This balances user experience with strict security during concurrent token rotation.
+
+```text
+Client
+ │
+ ├── Refresh Request #1 ──▶ Success
+ │
+ └── Refresh Request #2 ──▶ Arrives Moments Later
+                               │
+                               ▼
+                     Redis Grace Period Cache
+                               │
+                               ▼
+                     Return Same Token Pair
+```
+
+---
+
+#### Security Guarantees
+
+- JWT-based Authentication
+- Access & Refresh Token Architecture
+- Refresh Token Rotation
+- Token Family Tracking
+- Replay Attack Detection
+- Redis-backed Grace Period Recovery
+- Database-backed Token Revocation
+- BCrypt Password Hashing
+---
+
 ## 📦 Tech Stack
 
 | Technology | Purpose | Key Feature Implemented |
 |------------|----------|-------------------------|
-| FastAPI | Web Framework | Async APIs & Lifespan Management |
-| PostgreSQL | Relational Database | Partial Indexes & Constraints |
+| FastAPI | Web Framework | Async APIs & Lifespan Management & Authentication |
+| PostgreSQL | Relational Database | Partial Indexes & Constraints & Token Persistence |
 | SQLAlchemy | ORM | AsyncSession |
-| Redis | Broker & Cache | Streams & Atomic Operations |
+| Redis | Broker & Cache | Streams & Atomic Operations & Grace Period Handling  |
 | Structlog | Logging | Structured JSON Logs |
 | Docker | Infrastructure | Containerized Environment |
 
@@ -174,7 +267,7 @@ Create a `.env` file:
 POSTGRES_USER=your_postgres_user
 POSTGRES_PASSWORD=your_postgres_password
 POSTGRES_DB=your_database_name
-DATABASE_URL=postgresql+{driver_name}://user:password@localhost:5432/dbname
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/dbname
 
 REDIS_HOST=your_redis_host
 REDIS_PORT=your_redis_port

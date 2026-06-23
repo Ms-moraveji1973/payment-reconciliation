@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     REDIS_HOST: str = Field(alias="REDIS_HOST")
     REDIS_PORT: int = Field(alias="REDIS_PORT")
 
+    TOKEN_VERIFICATION: str = Field(alias="TOKEN_VERIFICATION")
+
     SECRET_KEY : str = Field(alias="SECRET_ACCESS_KEY")
     REFRESH_SECRET_KEY : str = Field(alias="SECRET_REFRESH_KEY")
     ALGORITHM: str = "HS256"

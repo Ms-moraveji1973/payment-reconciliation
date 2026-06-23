@@ -25,6 +25,10 @@ from .service import (
     parse_sms_transaction,
     handle_transaction_service
 )
+from app.modules.users.security import oauth2_scheme
+from app.core.config import get_settings
+
+config = get_settings()
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -80,33 +84,36 @@ async def delete_order(current_user: Annotated[User, Depends(get_current_user)],
 
 
 @router.post("/transaction", response_model=SmsWebhookPayloadResponse, status_code=status.HTTP_200_OK)
-async def receive_transaction(sms_transaction:SmsWebhookPayload, session:AsyncSession = Depends(get_db), redis_client: redis.Redis = Depends(get_redis)):
-    request_log = log.bind(payload=sms_transaction.model_dump())
-    request_log.info("transaction")
-    content = sms_transaction.content
-    if not content:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The content is required")
-    sms_data = await run_in_threadpool(parse_sms_transaction,content)
-    if not sms_data :
-        request_log.warning("missing_content")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The sms format isn't valid")
-    try:
-        result = await handle_transaction_service(sms_data, session, redis_client)
-        return result
-    except ValueError as v:
-        await session.rollback()
-        error_message = str(v)
-        if error_message == "error_duplicate_transaction":
-            return {
-                    "status": "already_exists",
-                    "detail": "The transaction data already exists"
-        }
+async def receive_transaction(sms_transaction:SmsWebhookPayload, token:Annotated[str, Depends(oauth2_scheme)], session:AsyncSession = Depends(get_db), redis_client: redis.Redis = Depends(get_redis)):
+    if token == config.TOKEN_VERIFICATION :
+        request_log = log.bind(payload=sms_transaction.model_dump())
+        request_log.info("transaction")
+        content = sms_transaction.content
+        if not content:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The content is required")
+        sms_data = await run_in_threadpool(parse_sms_transaction,content)
+        if not sms_data :
+            request_log.warning("missing_content")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The sms format isn't valid")
+        try:
+            result = await handle_transaction_service(sms_data, session, redis_client)
+            return result
+        except ValueError as v:
+            await session.rollback()
+            error_message = str(v)
+            if error_message == "error_duplicate_transaction":
+                return {
+                        "status": "already_exists",
+                        "detail": "The transaction data already exists"
+            }
 
-        elif error_message == "error_missing_fields":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
+            elif error_message == "error_missing_fields":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
 
-        else:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+            else:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+    else:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The TOKEN is invalid")
 
 
 """        elif error_message == "NoResultFound":

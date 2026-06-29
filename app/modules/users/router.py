@@ -128,13 +128,13 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
         elif get_rt_record.is_revoked :
-            result_blacklist = await token_in_grace_period(redis_client,jti)
-            if not result_blacklist :
+            grace_period_result = await token_in_grace_period(redis_client,jti)
+            if not grace_period_result :
                 await revoke_family_token(session,get_rt_record.family_id)
                 await session.commit()
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token Expired")
             else:
-                return result_blacklist
+                return grace_period_result
 
         if get_rt_record.expires_at < datetime.now(timezone.utc):
             await revoke_refresh_token(session,jti)

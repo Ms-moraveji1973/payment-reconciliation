@@ -6,6 +6,7 @@ import redis.asyncio as redis
 # internal package
 from .modules.order import router as order
 from .modules.users import router as users
+from .modules.admin import router as admin
 
 from .db.database import test_async_connection, SessionLocal
 from .db.redis_db import test_async_redis_connection, AmountSeeder
@@ -58,6 +59,7 @@ app = FastAPI(
 
 app.include_router(order.router, tags=["order"])
 app.include_router(users.router, tags=["users"])
+app.include_router(admin.router, tags=["admin"])
 
 
 @app.get("/test-connection")

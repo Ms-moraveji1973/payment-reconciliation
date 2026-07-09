@@ -82,6 +82,30 @@ async def get_all_pending_orders(session:AsyncSession, limit: int = 100):
         last_order = orders[-1].id
         yield orders
 
+async def get_pending_orders(session:AsyncSession, limit: int, cursor:int):
+    stmt = select(PaymentIntent).options(
+                                    joinedload(PaymentIntent.order).joinedload(Order.user)
+                                        ).where(PaymentIntent.status == OrderStatus.PENDING).order_by(PaymentIntent.id)
+    if cursor:
+        stmt = stmt.where(PaymentIntent.id > cursor)
+    result = await session.execute(stmt.limit(limit))
+    payment_intents = result.scalars().all()
+    formatted_orders = []
+    for pi in payment_intents:
+        formatted_orders.append({
+            "id": pi.order.id,
+            "status": pi.order.status,
+            "user": pi.order.user,
+            "created_at": pi.order.created_at,
+            "amount": pi.order.amount,
+            "payment": pi
+        })
+    next_cursor = payment_intents[-1].id if payment_intents else None
+    return {
+        "next_cursor" : next_cursor,
+        "orders" : formatted_orders
+    }
+
 
 async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
     try:

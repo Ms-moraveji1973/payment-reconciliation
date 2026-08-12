@@ -31,13 +31,13 @@ async def create_order_service(user:User, amount:int, session: AsyncSession, red
                                                     base_amount=amount,
                                                     exact_amount=unique_amount ))
         session.add(new_order)
-        try :
-            await session.flush()
-            return new_order
-        except IntegrityError :
-            await redis_client.smove("pending_orders","amounts",unique_amount)
-            await redis_client.sadd("free_amounts",unique_amount)
-            raise ValueError("Duplicate unique amount")
+        await session.flush()
+        return new_order
+
+    except IntegrityError :
+        await redis_client.smove("pending_orders","amounts",unique_amount)
+        await redis_client.sadd("free_amounts",unique_amount)
+        raise ValueError("Duplicate unique amount")
     except Exception:
         await redis_client.smove("pending_orders","amounts",unique_amount)
         await redis_client.sadd("free_amounts",unique_amount)

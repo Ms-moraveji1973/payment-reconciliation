@@ -1,8 +1,8 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock
-from sqlalchemy.exc import IntegrityError
-from app.modules.order.service import get_unique_amount, create_order_service, OrderStatus
+from unittest.mock import AsyncMock, MagicMock
+from sqlalchemy.exc import IntegrityError, NoResultFound, MultipleResultsFound
+from app.modules.order.service import get_unique_amount, create_order_service, OrderStatus, parse_sms_transaction, delete_order_service, process_pending_payment, handle_transaction_service
 
 
 @pytest.mark.asyncio
@@ -67,3 +67,77 @@ async def test_create_order_duplicate(fake_redis, mock_session, fake_user_data, 
 
     assert is_in_free
     assert not is_in_pending
+
+
+@pytest.mark.parametrize("sms, expected_type",
+    [
+        pytest.param(
+            "",
+            type(None),
+            id="none_type_test"
+            ),
+
+        pytest.param(
+            "بلو \nواریز پول\nمحمد عزیز\n1760021ریال به حساب شما نشست.\nموجودی: ۱۲۴۱۲۴۲۲۱۰ ریال\n۱۱:۴۸\n۱۴۰۵.۰۳.۱۲",
+            dict,
+            id="dict_type_test"
+            )
+    ]
+)
+def test_parse_sms_transaction(sms, expected_type):
+    parse_sms = parse_sms_transaction(sms)
+    assert isinstance(parse_sms, expected_type)
+
+
+@pytest.mark.asyncio
+async def test_delete_order(mock_session, fake_user_data, order_id:int=129):
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = None
+    mock_session.execute.return_value = mock_result
+
+    with pytest.raises(ValueError, match=r"Order not found"):
+        await delete_order_service(order_id, fake_user_data.id, mock_session)
+
+    mock_session.execute.assert_called_once()
+    mock_session.delete.assert_not_called()
+
+
+
+
+@pytest.mark.asyncio
+async def test_processing_pending_payment(mock_session, amount=1219518):
+    mock_result = MagicMock()
+    mock_result.scalar_one.side_effect = NoResultFound("stmt","params",Exception("DB constraint violated"))
+    mock_session.execute.return_value = mock_result
+
+
+    with pytest.raises(ValueError, match=r"NoResultFound"):
+        await process_pending_payment(amount, mock_session)
+
+
+@pytest.mark.asyncio
+async def test_handle_transaction(mocker, mock_session, fake_redis):
+    fake_sms_data = {"trace_id":"398xmm38b3jx-12382"}
+    mocker_create_tra = mocker.patch("app.modules.order.service.create_transaction_service", new_callable=AsyncMock)
+    fake_transaction = MagicMock()
+    fake_transaction.id = 131
+    fake_transaction.sms_amount = 2319512
+    mocker_create_tra.return_value = fake_transaction
+
+    mocker_msg_queue = mocker.patch("app.modules.order.service.MessageQueue")
+    mocker_msg_queue_instance = mocker_msg_queue.return_value
+    mocker_msg_queue_instance.enqueue = AsyncMock(return_value="msg-125")
+
+    handle_transaction = await handle_transaction_service(fake_sms_data, mock_session, fake_redis)
+
+    assert handle_transaction['status'] == 'accepted'
+    assert handle_transaction['redis_message_id'] == 'msg-125'
+    assert handle_transaction['transaction_id'] == 131
+
+    mocker_msg_queue_instance.enqueue.assert_awaited_once_with({
+    "trace_id": "398xmm38b3jx-12382",
+    "amount": 2319512,
+    "type": "payment"
+    })
+
+    mock_session.commit.assert_awaited_once()

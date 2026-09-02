@@ -2,7 +2,11 @@ import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.exc import IntegrityError, NoResultFound, MultipleResultsFound
-from app.modules.order.service import get_unique_amount, create_order_service, OrderStatus, parse_sms_transaction, delete_order_service, process_pending_payment, handle_transaction_service
+from redis.exceptions import RedisError
+
+from app.modules.order.service import (get_unique_amount, create_order_service, OrderStatus,
+                                    parse_sms_transaction, delete_order_service, process_pending_payment,
+                                    handle_transaction_service, get_pending_orders, create_transaction_service)
 
 
 @pytest.mark.asyncio
@@ -30,6 +34,18 @@ async def test_get_unique_amount_concurrency(fake_redis, mock_session):
     pending_count = await fake_redis.scard('pending_orders')
     assert pending_count == 30
 
+
+@pytest.mark.asyncio
+async def test_get_unique_amount_fallback(fake_redis, mock_session, mocker):
+    fake_redis.spop = AsyncMock(side_effect=RedisError())
+    mock_unique_amount = mocker.patch("app.modules.order.service.get_unique_amount_from_postgres")
+    mock_unique_amount.return_value = 1247981
+
+    amount = await get_unique_amount(mock_session, fake_redis)
+
+    assert amount == 1247981
+    fake_redis.spop.assert_awaited_once()
+    mock_unique_amount.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -141,3 +157,44 @@ async def test_handle_transaction(mocker, mock_session, fake_redis):
     })
 
     mock_session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_pending_orders(mock_session, limit=1):
+    fake_payment = MagicMock()
+    fake_payment.id = 12
+    fake_payment.status = "PENDING"
+
+    fake_order = MagicMock()
+    fake_order.id = 16
+    fake_order.amount = 2319512
+    fake_order.status = "PENDING"
+    fake_order.created_at = "2026/08/1"
+    fake_order.user = "luis hamilton"
+
+    fake_payment.order = fake_order
+
+    mock_result = MagicMock()
+    mock_session.execute.return_value = mock_result
+    mock_result.scalars.return_value.all.return_value = [fake_payment]
+    pendign_orders = await get_pending_orders(mock_session, limit, 0)
+
+    assert pendign_orders['next_cursor'] == 12
+    assert len(pendign_orders['orders']) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sms_data, expected",
+                         [
+                             pytest.param({"sms_amount":None, "sms_time":2341, "sms_date":"sakldjfa", "sms_inventory":2312, "webhook_payload": "alsdkfjasldfj"},
+                                          pytest.raises(ValueError, match="error_missing_fields"),
+                                          id="none_amount"),
+                            pytest.param({"sms_amount":2341, "sms_time":None, "sms_date":"sakldjfa", "sms_inventory":2312, "webhook_payload": "alsdkfjasldfj"},
+                                         pytest.raises(ValueError, match="error_missing_fields"),
+                                         id="none_payload")
+                         ])
+async def test_create_transaction_service(mock_session,sms_data, expected):
+    with expected:
+        await create_transaction_service(sms_data, mock_session)
+
+    mock_session.add.assert_not_called()

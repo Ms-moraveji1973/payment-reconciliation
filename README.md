@@ -287,6 +287,6 @@ docker compose up --build
 ## 🗺️ Roadmap
 - [ ] Support multiple bank SMS formats
 - [ ] Automatic expired payment handling
-- [ ] Administrative dashboard for failed transactions
+- [ ✔️ ] Administrative dashboard for failed transactions
 - [ ] Metrics & monitoring integration
 - [ ] Multi-bank transaction processing support

@@ -158,6 +158,28 @@ async def test_handle_transaction(mocker, mock_session, fake_redis):
 
     mock_session.commit.assert_awaited_once()
 
+@pytest.mark.asyncio
+async def test_handle_transaction_dual_write(mocker, mock_session, fake_redis):
+    fake_sms_data = {"trace_id":"398xmm38b3jx-12382"}
+    mocker_create_tra = mocker.patch("app.modules.order.service.create_transaction_service", new_callable=AsyncMock)
+    fake_transaction = MagicMock()
+    fake_transaction.id = 131
+    fake_transaction.sms_amount = 2319512
+    mocker_create_tra.return_value = fake_transaction
+
+    mocker_msg_queue = mocker.patch("app.modules.order.service.MessageQueue")
+    mocker_msg_queue_instance = mocker_msg_queue.return_value
+    mocker_msg_queue_instance.enqueue = AsyncMock(side_effect=RedisError())
+
+    with pytest.raises(RedisError):
+        await handle_transaction_service(fake_sms_data, mock_session, fake_redis)
+
+    assert fake_transaction.sms_amount == 2319512
+    assert fake_transaction.id == 131
+    # assert handle_transaction['transaction_id'] == 131
+
+    mock_session.commit.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_get_pending_orders(mock_session, limit=1):

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column ,relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from enum import Enum
+from typing import Any
 from datetime import datetime, timezone
 
 from app.db.base import Base
@@ -21,6 +22,11 @@ class OrderStatus(str,Enum):
     PAID = "PAID"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
+
+class EventStatus(str,Enum):
+    PENDING = "PENDING"
+    PUBLISHED = "PUBLISHED"
+    FAILED = "FAILED"
 
 
 class Order(Base):
@@ -82,3 +88,15 @@ class SMSTransaction(Base):
             name="uq_sms_amount_inventory_date_time"
             ),
         )
+
+
+class OutBoxOrderEvent(Base):
+    __tablename__ = "outbox_order_event"
+    id : Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status : Mapped[EventStatus] = mapped_column(sqlalchemyEnum(EventStatus), nullable=False, default=EventStatus.PENDING)
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+    created_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=func.now(),
+                                                nullable=False)

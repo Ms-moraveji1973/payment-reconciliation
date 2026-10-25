@@ -8,6 +8,7 @@ from .modules.order import router as order
 from .modules.users import router as users
 from .modules.admin import router as admin
 
+from .scheduler import setup_scheduler
 from .db.database import test_async_connection, SessionLocal
 from .db.redis_db import test_async_redis_connection, AmountSeeder
 from .core.config import get_settings
@@ -40,7 +41,11 @@ async def lifespan(app : FastAPI):
 
     await app.state.redis.sdiffstore('free_amounts',['amounts','pending_orders'])
 
+    scheduler = setup_scheduler(app.state.redis)
+    scheduler.start()
+
     yield
+    scheduler.shutdown()
     await app.state.redis.aclose()
 
 

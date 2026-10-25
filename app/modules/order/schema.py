@@ -45,5 +45,4 @@ class OrderPaymentResponse(BaseModel):
 
 class SmsWebhookPayloadResponse(BaseModel):
     status : str
-    redis_message_id: str
     transaction_id : int

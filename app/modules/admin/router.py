@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated, Optional
+import redis.asyncio as redis
 
 # internal package
 from app.db.database import get_db
+from app.db.redis_db import get_redis
+
 from app.modules.users.models import User
 from app.modules.order.service import get_pending_orders
 from .service import get_current_admin_user, get_dead_letter_queue, handle_pending_payment
@@ -41,9 +44,9 @@ async def get_all_users_orders(session: Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.patch('/order/{order_id}/payment/{payment_id}/confirm', status_code=status.HTTP_200_OK)
-async def confirm_payment(order_id: int , payment_id: int, session: Annotated[AsyncSession, Depends(get_db)],current_user: Annotated[User, Depends(get_current_admin_user)]):
+async def confirm_payment(order_id: int , payment_id: int, session: Annotated[AsyncSession, Depends(get_db)],current_user: Annotated[User, Depends(get_current_admin_user)], redis_client:Annotated[redis.Redis,Depends(get_redis)]):
     try :
-        update_payment = await handle_pending_payment(order_id, payment_id, session)
+        update_payment = await handle_pending_payment(order_id, payment_id, session, redis_client)
         await session.commit()
         return update_payment
     except ValueError as v:

@@ -10,7 +10,7 @@ import random
 import re
 import uuid
 # internal
-from .models import Order, PaymentIntent, OrderStatus, SMSTransaction
+from .models import Order, PaymentIntent, OrderStatus, SMSTransaction, OutBoxOrderEvent
 from app.modules.users.models import User
 from app.core.logger import log
 from .queue_manager import MessageQueue
@@ -127,6 +127,8 @@ async def get_unique_amount_from_postgres(session: AsyncSession):
     async for orders in get_all_pending_orders(session) :
         for order in orders:
             pending_orders.add(order.exact_amount)
+    if not pending_orders:
+        return random.randint(1500000, 1550000)
     possible_range = set(range(min(pending_orders), max(pending_orders)+200))
     available_amounts = list(possible_range - pending_orders)
     unique_amount = random.choice(available_amounts)
@@ -172,25 +174,49 @@ async def create_transaction_service(sms_data: dict, session:AsyncSession):
         raise ValueError("error_duplicate_transaction")
 
 
-async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis_client: redis.Redis):
-    transaction = await create_transaction_service(sms_data, session)
-    await session.commit()
-    amount = transaction.sms_amount
-    trace_id = sms_data["trace_id"]
-    transaction_id = transaction.id
-    transaction_data = {
-        "trace_id":trace_id,
-        "amount":amount,
-        "type":"payment"
-        }
-    process_pending_queue = MessageQueue(redis_client, stream_name="pending_orders_queue")
-    message_id = await process_pending_queue.enqueue(transaction_data)
-    return {
-        "status" : "accepted",
-        "redis_message_id" : message_id,
-        "transaction_id":transaction_id
-    }
+async def create_outbox_event_service(session:AsyncSession, transaction_data: dict):
+    if not transaction_data:
+        raise ValueError("error_missing")
+    new_event = OutBoxOrderEvent(data=transaction_data)
+    session.add(new_event)
+    try:
+        await session.flush()
+        return new_event
+    except IntegrityError:
+        raise ValueError("error_duplicate_event")
 
+
+
+async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis_client: redis.Redis):
+    try:
+        transaction = await create_transaction_service(sms_data, session)
+        amount = transaction.sms_amount
+        trace_id = sms_data["trace_id"]
+        transaction_id = transaction.id
+        transaction_data = {
+            "trace_id":trace_id,
+            "amount":amount,
+            "type":"payment"
+            }
+        await create_outbox_event_service(session, transaction_data)
+        await session.commit()
+        log.info("transaction and order event committed to database successfully")
+        # a background job like celery should send message to redis queue from outbox_order_event
+
+        '''
+        process_pending_queue = MessageQueue(redis_client, stream_name="pending_orders_queue")
+        message_id = await process_pending_queue.enqueue(transaction_data)
+        '''
+
+        return {
+            "status" : "accepted",
+            "transaction_id": transaction_id
+        }
+
+    except IntegrityError:
+        await session.rollback()
+        log.error("transaction and order event failed")
+        raise ValueError('database_error')
 
 
 

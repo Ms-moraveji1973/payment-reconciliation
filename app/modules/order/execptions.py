@@ -8,3 +8,7 @@ class IgnoreAndAckMessage(WorkerException):
 
 class CriticalRejectMessage(WorkerException):
     pass
+
+
+class OutBoxEventRedisException(Exception):
+    pass

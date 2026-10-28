@@ -7,6 +7,7 @@ from app.core.logger import log
 from app.db.database import SessionLocal
 from .models import OutBoxOrderEvent, EventStatus
 from .queue_manager import MessageQueue
+from .execptions import OutBoxEventRedisException
 
 async def process_outbox_event(redis_client: redis.Redis):
     async with SessionLocal() as session:
@@ -25,14 +26,13 @@ async def process_outbox_event(redis_client: redis.Redis):
                 log.info(f"the message order :{events_data['amount']} changed status to PUBLISHED")
 
 
-        except RedisError:
-            log.error("redis error at sending message to pending order queue")
-            raise ValueError()
+        except RedisError as re:
+            redis_error = str(re)
+            log.error(f"redis error at sending message to pending order queue : {redis_error}")
+            raise OutBoxEventRedisException("redis_error")
 
-        except IntegrityError:
-            pass
 
         except Exception as e:
-            await session.rollback()
             error_msg = str(e)
             log.error(error_msg)
+            raise ValueError("unknown_error")

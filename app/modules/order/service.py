@@ -14,6 +14,7 @@ from .models import Order, PaymentIntent, OrderStatus, SMSTransaction, OutBoxOrd
 from app.modules.users.models import User
 from app.core.logger import log
 from .queue_manager import MessageQueue
+from .execptions import OutBoxEventRedisException
 
 
 async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
@@ -212,6 +213,22 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
             "status" : "accepted",
             "transaction_id": transaction_id
         }
+
+    except ValueError as ev:
+        await session.rollback()
+        error_msg = str(ev)
+
+        if error_msg == "error_duplicate_event":
+            raise ValueError("error_duplicate_event")
+
+        elif error_msg == "error_duplicate_transaction":
+            raise ValueError("error_duplicate_transaction")
+
+        elif error_msg == "error_missing_fields":
+            raise ValueError("error_missing_fields")
+
+        else:
+            raise ValueError("unknown_error")
 
     except IntegrityError:
         await session.rollback()

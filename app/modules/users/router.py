@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
 from fastapi.security import OAuth2PasswordRequestForm
-from jwt.exceptions import (DecodeError, InvalidSignatureError)
+from jwt.exceptions import (DecodeError, InvalidSignatureError, ExpiredSignatureError, InvalidTokenError)
 import redis.asyncio as redis
 
 from .schema import (UserTelegramSchema, UserTelegramResponseSchema,
@@ -36,6 +36,7 @@ from .models import User
 from app.db.redis_db import get_redis, add_token_to_grace_period, token_in_grace_period
 from app.core.config import get_settings
 from app.db.database import get_db
+from app.core.logger import log
 
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -105,10 +106,20 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
         if rf_token.refresh_token is None :
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Refresh Token missing")
         payload =  decode_refresh_token(rf_token.refresh_token)
-    except DecodeError :
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid token in decoding refresh token")
-    except InvalidSignatureError :
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Token signature is invalid")
+
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired")
+
+    except DecodeError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token in decoding refresh token")
+
+    except InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+    except Exception as e:
+        error_msg = str(e)
+        log.error(error_msg)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error processing token")
 
     # validate type
     if payload.get("type") != "refresh":

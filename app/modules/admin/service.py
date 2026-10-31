@@ -29,7 +29,7 @@ async def get_current_admin_user(current_user:Annotated[User,Depends(get_current
     raise HTTPException(status_code=403, detail="You can't access to the admin panel")
 
 
-async def handle_pending_payment(order_id:int, payment_id:int, session: AsyncSession):
+async def handle_pending_payment(order_id:int, payment_id:int, session: AsyncSession, redis_client: Annotated[redis.Redis, Depends(get_redis)]):
     stmt = select(PaymentIntent).with_for_update(nowait=False).options(joinedload(PaymentIntent.order, innerjoin=True)).where(PaymentIntent.id == payment_id, PaymentIntent.order_id == order_id,
                                                                                                                               PaymentIntent.status.in_([OrderStatus.PENDING, OrderStatus.FAILED]))
     payment_result = await session.execute(stmt)
@@ -38,10 +38,10 @@ async def handle_pending_payment(order_id:int, payment_id:int, session: AsyncSes
         payment.status = OrderStatus.PAID
         payment.order.status = OrderStatus.PAID
         await session.flush()
+        exact_amount = payment.exact_amount
+        await redis_client.smove("pending_orders", "free_amounts", str(exact_amount))
         log.info("The order status has been changed to PAID by admin",status="PAID")
         return payment
 
     except NoResultFound:
         raise ValueError("NoResultFound")
-
-

@@ -6,7 +6,8 @@ from redis.exceptions import RedisError
 
 from app.modules.order.service import (get_unique_amount, create_order_service, OrderStatus,
                                     parse_sms_transaction, delete_order_service, process_pending_payment,
-                                    handle_transaction_service, get_pending_orders, create_transaction_service)
+                                    handle_transaction_service, get_pending_orders, create_transaction_service,
+                                    create_outbox_event_service)
 
 
 @pytest.mark.asyncio
@@ -119,7 +120,6 @@ async def test_delete_order(mock_session, fake_user_data, order_id:int=129):
 
 
 
-
 @pytest.mark.asyncio
 async def test_processing_pending_payment(mock_session, amount=1219518):
     mock_result = MagicMock()
@@ -138,23 +138,25 @@ async def test_handle_transaction(mocker, mock_session, fake_redis):
     fake_transaction = MagicMock()
     fake_transaction.id = 131
     fake_transaction.sms_amount = 2319512
+    fake_transaction.trace_id = fake_sms_data["trace_id"]
     mocker_create_tra.return_value = fake_transaction
 
-    mocker_msg_queue = mocker.patch("app.modules.order.service.MessageQueue")
-    mocker_msg_queue_instance = mocker_msg_queue.return_value
-    mocker_msg_queue_instance.enqueue = AsyncMock(return_value="msg-125")
+    transaction_data =  {
+                "trace_id":fake_transaction.trace_id,
+                "amount":fake_transaction.sms_amount,
+                "type":"payment"
+                        }
+
+    mocker_outbox = mocker.patch("app.modules.order.service.create_outbox_event_service", new_callable=AsyncMock)
+    mocker_outbox_instance = MagicMock()
+    mocker_outbox_instance.data = transaction_data
+    mocker_outbox.return_value = mocker_outbox_instance
+
 
     handle_transaction = await handle_transaction_service(fake_sms_data, mock_session, fake_redis)
 
     assert handle_transaction['status'] == 'accepted'
-    assert handle_transaction['redis_message_id'] == 'msg-125'
     assert handle_transaction['transaction_id'] == 131
-
-    mocker_msg_queue_instance.enqueue.assert_awaited_once_with({
-    "trace_id": "398xmm38b3jx-12382",
-    "amount": 2319512,
-    "type": "payment"
-    })
 
     mock_session.commit.assert_awaited_once()
 

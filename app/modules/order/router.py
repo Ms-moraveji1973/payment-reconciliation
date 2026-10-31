@@ -25,6 +25,8 @@ from .service import (
     parse_sms_transaction,
     handle_transaction_service
 )
+from .execptions import OutBoxEventRedisException
+
 from app.modules.users.security import oauth2_scheme
 from app.core.config import get_settings
 
@@ -102,13 +104,13 @@ async def receive_transaction(sms_transaction:SmsWebhookPayload, token:Annotated
             await session.rollback()
             error_message = str(v)
             if error_message == "error_duplicate_transaction":
-                return {
-                        "status": "already_exists",
-                        "detail": "The transaction data already exists"
-            }
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data already exists")
 
             elif error_message == "error_missing_fields":
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
+
+            elif error_message == "error_duplicate_event":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The event data already exists")
 
             else:
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")

@@ -110,11 +110,12 @@ class Worker:
     async def _process_batch(self):
         stale = await self.consumer.claim_stale_message(min_idle_time=6000)
         for stale_message in stale:
-            amount = message.data.get("amount")
-            trace_id = message.data.get("trace_id")
+            amount = stale_message.data.get("amount")
+            trace_id = stale_message.data.get("trace_id")
             if not amount:
                 log.warning(f"Message {trace_id} has no amount field.")
                 await self._move_to_dead_letter(stale_message)
+                await self.consumer.acknowledge(stale_message.id)
                 continue
 
             if await self._process_message(stale_message):
@@ -130,6 +131,7 @@ class Worker:
             if not amount:
                 log.warning(f"Message {trace_id} has no amount field.")
                 await self._move_to_dead_letter(message)
+                await self.consumer.acknowledge(message.id)
                 continue
 
             if await self._process_message(message):

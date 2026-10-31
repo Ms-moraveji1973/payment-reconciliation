@@ -39,6 +39,21 @@ class MessageQueue:
         return msg_id
 
 
+    async def enqueue_dead_letter(self, data: dict, *, event_id: int, reason:str):
+        payload = {
+            "event_id": event_id,
+            "data": json.dumps(data),
+            "reason": reason,
+            "original_stream": self.stream_name,
+            "created_at": str(time.time()),
+        }
+        return await self.redis.xadd(
+            self.dead_letter_stream,
+            payload,
+            maxlen=self.max_len,
+            approximate=True,
+        )
+
 class ConsumerGroup:
     def __init__(self, queue: MessageQueue, group_name:str, consumer_name:str):
         self.queue = queue

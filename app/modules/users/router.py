@@ -36,6 +36,7 @@ from .models import User
 from app.db.redis_db import get_redis, add_token_to_grace_period, token_in_grace_period
 from app.core.config import get_settings
 from app.db.database import get_db
+from app.core.logger import log
 
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -112,13 +113,12 @@ async def refresh_token(rf_token:RefreshTokenRequest, session:AsyncSession = Dep
     except DecodeError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token in decoding refresh token")
 
-    except InvalidSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token signature is invalid")
-
     except InvalidTokenError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
-    except Exception:
+    except Exception as e:
+        error_msg = str(e)
+        log.error(error_msg)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error processing token")
 
     # validate type

@@ -5,7 +5,8 @@ from sqlalchemy import (DateTime, Integer, String, func,
                         Boolean,
                         Index,
                         text,
-                        UniqueConstraint
+                        UniqueConstraint,
+                        Text
                         )
 from sqlalchemy.orm import Mapped, mapped_column ,relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -25,6 +26,7 @@ class OrderStatus(str,Enum):
 
 class EventStatus(str,Enum):
     PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
     PUBLISHED = "PUBLISHED"
     FAILED = "FAILED"
 
@@ -100,3 +102,6 @@ class OutBoxOrderEvent(Base):
     )
     created_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=func.now(),
                                                 nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

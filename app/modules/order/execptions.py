@@ -12,3 +12,6 @@ class CriticalRejectMessage(WorkerException):
 
 class OutBoxEventRedisException(Exception):
     pass
+
+class InvalidOutboxPayload(Exception):
+    pass

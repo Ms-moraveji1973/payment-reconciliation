@@ -1,5 +1,6 @@
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from redis.exceptions import RedisError
 import redis.asyncio as redis
 import random
@@ -7,37 +8,40 @@ from datetime import datetime, timedelta, timezone
 
 
 from app.core.logger import log
-from app.db.database import SessionLocal
+from app.db.database import SessionLocal, get_session
 from .models import OutBoxOrderEvent, EventStatus
 from .queue_manager import MessageQueue
-from .execptions import OutBoxEventRedisException, InvalidOutboxPayload
+from .exceptions import OutBoxEventRedisException, InvalidOutboxPayload, OutboxEventNotFoundError
 
 
 
-async def claim_process_events(limit_s: int = 100) -> list[dict]:
-    async with SessionLocal() as session:
-        async with session.begin():
+async def claim_process_events(session: AsyncSession, limit_s: int = 100) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    stale_lock = now - timedelta(minutes=5)
+
+    async with session.begin():
+        cte_query = (select(OutBoxOrderEvent).where( (OutBoxOrderEvent.status == EventStatus.PENDING) | ( (OutBoxOrderEvent.status == EventStatus.PROCESSING) & (OutBoxOrderEvent.locked_at < now - timedelta(minutes=5) ) ) ).order_by(OutBoxOrderEvent.created_at.asc()).limit(limit_s).with_for_update(skip_locked=True).cte("claimed_ctr"))
+        stmt = update(OutBoxOrderEvent).where(OutBoxOrderEvent.id == cte_query.c.id).values(OutBoxOrderEvent.status =)
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+
+
+        for event in events:
             now = datetime.now(timezone.utc)
-            query = select(OutBoxOrderEvent).where( (OutBoxOrderEvent.status == EventStatus.PENDING) | ( (OutBoxOrderEvent.status == EventStatus.PROCESSING) & (OutBoxOrderEvent.locked_at < now - timedelta(minutes=5) ) ) ).limit(limit_s).with_for_update(skip_locked=True)
-            result = await session.execute(query)
-            events = result.scalars().all()
+            events_data = event.data
+            log.info(f"outbox events data found {events_data}")
+            event.status = EventStatus.PROCESSING
+            event.locked_at = now
+            log.info(f"the message order :{events_data['amount']} changed status to PROCESSING")
 
-            for event in events:
-                now = datetime.now(timezone.utc)
-                events_data = event.data
-                log.info(f"outbox events data found {events_data}")
-                event.status = EventStatus.PROCESSING
-                event.locked_at = now
-                log.info(f"the message order :{events_data['amount']} changed status to PROCESSING")
-
-            return [
-                {
-                    "id": event.id,
-                    "data": event.data,
-                    "retry_count": event.retry_count if event.retry_count >= 0 else None
-                }
-                for event in events
-            ]
+        return [
+            {
+                "id": event.id,
+                "data": event.data,
+                "retry_count": event.retry_count if event.retry_count >= 0 else None
+            }
+            for event in events
+        ]
 
 
 
@@ -65,7 +69,7 @@ async def update_outbox_event(event_id, *, status, retry_count=None, last_error=
             event = await session.get(OutBoxOrderEvent, event_id)
 
             if event is None:
-                raise LookupError(f"Outbox event not found: {event_id}")
+                raise OutboxEventNotFoundError(f"Outbox event not found: {event_id}")
 
             event.status = status
 

@@ -11,6 +11,7 @@ from app.modules.admin.service import (
 from app.modules.admin.dlq_manager import DeadLetterQueue
 from app.modules.users.models import User
 from app.modules.order.models import Order, PaymentIntent, OrderStatus
+from app.modules.order.exceptions import PaymentIntentNotFoundError
 
 
 @pytest.mark.asyncio
@@ -75,7 +76,7 @@ async def test_handle_pending_payment_not_found(mock_session, fake_redis):
     mock_result.scalar_one.side_effect = NoResultFound("No row found")
     mock_session.execute.return_value = mock_result
 
-    with pytest.raises(ValueError, match="NoResultFound"):
+    with pytest.raises(PaymentIntentNotFoundError):
         await handle_pending_payment(
             order_id=99,
             payment_id=99,

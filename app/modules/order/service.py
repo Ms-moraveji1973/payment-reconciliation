@@ -13,8 +13,18 @@ import uuid
 from .models import Order, PaymentIntent, OrderStatus, SMSTransaction, OutBoxOrderEvent
 from app.modules.users.models import User
 from app.core.logger import log
+from app.core.exceptions import DatabaseError
 from .queue_manager import MessageQueue
-from .execptions import OutBoxEventRedisException
+from .exceptions import (
+    OutBoxEventRedisException,
+    OrderNotFoundError,
+    DuplicateUniqueAmountError,
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+    InvalidSMSDataError,
+    DuplicateSMSTransactionError,
+    DuplicateOutboxEventError,
+)
 
 
 async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
@@ -35,14 +45,14 @@ async def create_order_service(user:User, amount:int, session: AsyncSession, red
         await session.flush()
         return new_order
 
-    except IntegrityError :
+    except IntegrityError as exc:
         await redis_client.smove("pending_orders","amounts",unique_amount)
         await redis_client.sadd("free_amounts",unique_amount)
-        raise ValueError("Duplicate unique amount")
-    except Exception:
+        raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
+    except Exception as exc:
         await redis_client.smove("pending_orders","amounts",unique_amount)
         await redis_client.sadd("free_amounts",unique_amount)
-        raise ValueError("Database error occurred ")
+        raise DatabaseError("Database error occurred") from exc
 
 
 
@@ -58,7 +68,7 @@ async def delete_order_service(order_id:int,user_id:int,session:AsyncSession):
     result = await session.execute(get_order_by_user)
     order = result.scalars().first()
     if not order:
-        raise ValueError("Order not found")
+        raise OrderNotFoundError("Order not found")
     await session.delete(order)
 
 
@@ -151,40 +161,40 @@ async def process_pending_payment(amount:int, session: AsyncSession):
         log.info("the transaction amount has been found and changed the status to PAID",status="transaction_found")
         return payment
 
-    except NoResultFound:
-        raise ValueError("NoResultFound")
+    except NoResultFound as exc:
+        raise PaymentIntentNotFoundError(f"Payment intent for amount {amount} not found") from exc
 
-    except MultipleResultsFound:
-        raise ValueError("MultipleResultsFound")
+    except MultipleResultsFound as exc:
+        raise DuplicatePaymentIntentError(f"Multiple payment intents found for amount {amount}") from exc
 
 
 async def create_transaction_service(sms_data: dict, session:AsyncSession):
-    amount = sms_data["sms_amount"]
-    inventory = sms_data["sms_inventory"]
-    date = sms_data["sms_date"]
-    time = sms_data["sms_time"]
-    webhook_payload = sms_data["webhook_payload"]
+    amount = sms_data.get("sms_amount")
+    inventory = sms_data.get("sms_inventory")
+    date = sms_data.get("sms_date")
+    time = sms_data.get("sms_time")
+    webhook_payload = sms_data.get("webhook_payload")
     if None in (amount, inventory, date, time, webhook_payload):
-        raise ValueError("error_missing_fields")
+        raise InvalidSMSDataError("error_missing_fields")
     new_transaction = SMSTransaction(sms_amount=amount, sms_inventory=inventory, sms_date=date, sms_time=time, webhook_payload=webhook_payload)
     session.add(new_transaction)
     try:
         await session.flush()
         return new_transaction
-    except IntegrityError:
-        raise ValueError("error_duplicate_transaction")
+    except IntegrityError as exc:
+        raise DuplicateSMSTransactionError("error_duplicate_transaction") from exc
 
 
 async def create_outbox_event_service(session:AsyncSession, transaction_data: dict):
     if not transaction_data:
-        raise ValueError("error_missing")
+        raise InvalidSMSDataError("error_missing")
     new_event = OutBoxOrderEvent(data=transaction_data)
     session.add(new_event)
     try:
         await session.flush()
         return new_event
-    except IntegrityError:
-        raise ValueError("error_duplicate_event")
+    except IntegrityError as exc:
+        raise DuplicateOutboxEventError("error_duplicate_event") from exc
 
 
 
@@ -214,26 +224,14 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
             "transaction_id": transaction_id
         }
 
-    except ValueError as ev:
+    except (InvalidSMSDataError, DuplicateSMSTransactionError, DuplicateOutboxEventError):
         await session.rollback()
-        error_msg = str(ev)
+        raise
 
-        if error_msg == "error_duplicate_event":
-            raise ValueError("error_duplicate_event")
-
-        elif error_msg == "error_duplicate_transaction":
-            raise ValueError("error_duplicate_transaction")
-
-        elif error_msg == "error_missing_fields":
-            raise ValueError("error_missing_fields")
-
-        else:
-            raise ValueError("unknown_error")
-
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
-        log.error("transaction and order event failed")
-        raise ValueError('database_error')
+        log.error("transaction and order event failed due to database constraint")
+        raise DatabaseError("database_error") from exc
 
 
 

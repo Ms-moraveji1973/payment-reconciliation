@@ -1,6 +1,11 @@
 from app.db.database import SessionLocal
 from app.modules.order.service import process_pending_payment
-from app.modules.order.execptions import IgnoreAndAckMessage, CriticalRejectMessage
+from app.modules.order.exceptions import (
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+    IgnoreAndAckMessage,
+    CriticalRejectMessage,
+)
 from app.core.logger import log as logger
 
 async def handle_payment(message, redis_client):
@@ -14,17 +19,15 @@ async def handle_payment(message, redis_client):
             logger.info(f"Message {message.id} processed successfully.")
             return True
 
-        except ValueError as e:
+        except PaymentIntentNotFoundError:
             await session.rollback()
-            error_message = str(e)
-            print(error_message)
-            if error_message == "NoResultFound":
-                logger.warning(f"{message.id} has been acknowledged")
-                raise IgnoreAndAckMessage(f"{amount} not found in DB")
+            logger.warning(f"{message.id} has been acknowledged")
+            raise IgnoreAndAckMessage(f"{amount} not found in DB")
 
-            elif error_message == "MultipleResultsFound":
-                logger.critical(f"There are the same {amount} in DB --> {message.id}")
-                raise CriticalRejectMessage(f"Duplicate amounts found for {amount}")
+        except DuplicatePaymentIntentError:
+            await session.rollback()
+            logger.critical(f"There are the same {amount} in DB --> {message.id}")
+            raise CriticalRejectMessage(f"Duplicate amounts found for {amount}")
 
         except Exception as error:
             await session.rollback()

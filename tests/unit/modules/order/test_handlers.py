@@ -1,7 +1,12 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from app.modules.order.handlers import handle_payment
-from app.modules.order.execptions import IgnoreAndAckMessage, CriticalRejectMessage
+from app.modules.order.exceptions import (
+    IgnoreAndAckMessage,
+    CriticalRejectMessage,
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+)
 from app.modules.order.queue_manager import Message
 
 
@@ -40,7 +45,7 @@ async def test_handle_payment_success(mocker, fake_redis):
 async def test_handle_payment_no_result_found(mocker, fake_redis):
     mocker.patch(
         "app.modules.order.handlers.process_pending_payment",
-        side_effect=ValueError("NoResultFound")
+        side_effect=PaymentIntentNotFoundError("not found in DB")
     )
     mock_session = AsyncMock()
     mock_session_local = MagicMock()
@@ -64,7 +69,7 @@ async def test_handle_payment_no_result_found(mocker, fake_redis):
 async def test_handle_payment_multiple_results_found(mocker, fake_redis):
     mocker.patch(
         "app.modules.order.handlers.process_pending_payment",
-        side_effect=ValueError("MultipleResultsFound")
+        side_effect=DuplicatePaymentIntentError("Duplicate amounts")
     )
     mock_session = AsyncMock()
     mock_session_local = MagicMock()

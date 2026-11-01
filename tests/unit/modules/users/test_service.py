@@ -19,6 +19,11 @@ from app.modules.users.service import (
 )
 from app.modules.users.schema import UserTelegramSchema
 from app.modules.users.models import User, RefreshToken
+from app.modules.users.exceptions import (
+    UserAlreadyExistsError,
+    UsernameAlreadyExistsError,
+    TokenRevocationError,
+)
 
 
 @pytest.mark.asyncio
@@ -38,7 +43,7 @@ async def test_create_telegram_user_duplicate_error(mock_session):
     user_data = UserTelegramSchema(telegram_id=123456789, username="telegram_user", name="Ali")
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("Duplicate telegram_id"))
 
-    with pytest.raises(ValueError, match="User already exists"):
+    with pytest.raises(UserAlreadyExistsError, match="User already exists"):
         await create_telegram_user_service(user_data, mock_session)
 
 
@@ -79,7 +84,7 @@ async def test_register_user_service_success(mock_session):
 async def test_register_user_service_duplicate_username(mock_session):
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("Duplicate username"))
 
-    with pytest.raises(ValueError, match="username already exists"):
+    with pytest.raises(UsernameAlreadyExistsError, match="username already exists"):
         await register_user_service("existing_user", "password123", "User Name", mock_session)
 
 
@@ -186,7 +191,7 @@ async def test_revoke_refresh_token_success_and_error(mock_session):
 
     # Integrity error scenario
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("DB err"))
-    with pytest.raises(ValueError, match="Error at revoking refresh token"):
+    with pytest.raises(TokenRevocationError, match="Error at revoking refresh token"):
         await revoke_refresh_token(mock_session, "jti_to_revoke")
 
 
@@ -198,7 +203,7 @@ async def test_revoke_family_token_success_and_error(mock_session):
     mock_session.flush.assert_awaited_once()
 
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("DB err"))
-    with pytest.raises(ValueError, match="Error at revoking family_id refresh token"):
+    with pytest.raises(TokenRevocationError, match="Error at revoking family_id refresh token"):
         await revoke_family_token(mock_session, fam_id)
 
 
@@ -209,5 +214,5 @@ async def test_revoke_all_tokens_success_and_error(mock_session):
     mock_session.flush.assert_awaited_once()
 
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("DB err"))
-    with pytest.raises(ValueError, match="Error at deleting all refresh tokens"):
+    with pytest.raises(TokenRevocationError, match="Error at deleting all refresh tokens"):
         await revoke_all_tokens(mock_session, user_id=12)

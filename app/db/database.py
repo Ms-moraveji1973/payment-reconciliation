@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     AsyncSession )
 
+from contextlib import asynccontextmanager
+
 from ..core.config import get_settings
 config = get_settings()
 def get_database():
@@ -27,6 +29,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+@asynccontextmanager
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    async with SessionLocal() as session:
+        yield session
 
 
 async def test_async_connection() -> bool:

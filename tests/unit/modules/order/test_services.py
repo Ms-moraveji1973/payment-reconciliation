@@ -8,6 +8,15 @@ from app.modules.order.service import (get_unique_amount, create_order_service, 
                                     parse_sms_transaction, delete_order_service, process_pending_payment,
                                     handle_transaction_service, get_pending_orders, create_transaction_service,
                                     create_outbox_event_service)
+from app.modules.order.exceptions import (
+    OrderNotFoundError,
+    DuplicateUniqueAmountError,
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+    InvalidSMSDataError,
+    DuplicateSMSTransactionError,
+    DuplicateOutboxEventError,
+)
 
 
 @pytest.mark.asyncio
@@ -76,7 +85,7 @@ async def test_create_order_duplicate(fake_redis, mock_session, fake_user_data, 
 
     mock_session.flush = AsyncMock(side_effect=IntegrityError("stmt","params",Exception("DB constraint violated")))
 
-    with pytest.raises(ValueError, match=r"Duplicate unique amount"):
+    with pytest.raises(DuplicateUniqueAmountError, match=r"Duplicate unique amount"):
         await create_order_service(fake_user_data, amount, mock_session, fake_redis)
 
     is_in_free = await fake_redis.sismember("free_amounts", str(exact_amount))
@@ -112,7 +121,7 @@ async def test_delete_order(mock_session, fake_user_data, order_id:int=129):
     mock_result.scalars.return_value.first.return_value = None
     mock_session.execute.return_value = mock_result
 
-    with pytest.raises(ValueError, match=r"Order not found"):
+    with pytest.raises(OrderNotFoundError, match=r"Order not found"):
         await delete_order_service(order_id, fake_user_data.id, mock_session)
 
     mock_session.execute.assert_called_once()
@@ -127,7 +136,7 @@ async def test_processing_pending_payment(mock_session, amount=1219518):
     mock_session.execute.return_value = mock_result
 
 
-    with pytest.raises(ValueError, match=r"NoResultFound"):
+    with pytest.raises(PaymentIntentNotFoundError):
         await process_pending_payment(amount, mock_session)
 
 
@@ -189,10 +198,10 @@ async def test_get_pending_orders(mock_session, limit=1):
 @pytest.mark.parametrize("sms_data, expected",
                          [
                              pytest.param({"sms_amount":None, "sms_time":2341, "sms_date":"sakldjfa", "sms_inventory":2312, "webhook_payload": "alsdkfjasldfj"},
-                                          pytest.raises(ValueError, match="error_missing_fields"),
+                                          pytest.raises(InvalidSMSDataError, match="error_missing_fields"),
                                           id="none_amount"),
                             pytest.param({"sms_amount":2341, "sms_time":None, "sms_date":"sakldjfa", "sms_inventory":2312, "webhook_payload": "alsdkfjasldfj"},
-                                         pytest.raises(ValueError, match="error_missing_fields"),
+                                         pytest.raises(InvalidSMSDataError, match="error_missing_fields"),
                                          id="none_payload")
                          ])
 async def test_create_transaction_service(mock_session,sms_data, expected):
@@ -285,7 +294,7 @@ async def test_process_pending_payment_multiple_results_found(mock_session):
     mock_result.scalar_one.side_effect = MultipleResultsFound("Duplicate rows")
     mock_session.execute.return_value = mock_result
 
-    with pytest.raises(ValueError, match=r"MultipleResultsFound"):
+    with pytest.raises(DuplicatePaymentIntentError):
         await process_pending_payment(1520000, mock_session)
 
 
@@ -318,14 +327,14 @@ async def test_create_outbox_event_service_success(mock_session):
 
 @pytest.mark.asyncio
 async def test_create_outbox_event_service_missing_data(mock_session):
-    with pytest.raises(ValueError, match="error_missing"):
+    with pytest.raises(InvalidSMSDataError, match="error_missing"):
         await create_outbox_event_service(mock_session, {})
 
 
 @pytest.mark.asyncio
 async def test_create_outbox_event_service_integrity_error(mock_session):
     mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("DB constraint violated"))
-    with pytest.raises(ValueError, match="error_duplicate_event"):
+    with pytest.raises(DuplicateOutboxEventError, match="error_duplicate_event"):
         await create_outbox_event_service(mock_session, {"amount": 100})
 
 
@@ -356,5 +365,5 @@ async def test_create_transaction_service_duplicate_integrity_error(mock_session
         "sms_time": "12:30",
         "webhook_payload": "valid raw content"
     }
-    with pytest.raises(ValueError, match="error_duplicate_transaction"):
+    with pytest.raises(DuplicateSMSTransactionError, match="error_duplicate_transaction"):
         await create_transaction_service(valid_sms_data, mock_session)

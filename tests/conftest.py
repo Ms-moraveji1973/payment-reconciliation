@@ -3,6 +3,7 @@ import fakeredis.aioredis
 import pytest_asyncio
 
 from unittest.mock import AsyncMock, MagicMock
+import app.modules.order.models
 from app.modules.users.models import User
 
 @pytest_asyncio.fixture

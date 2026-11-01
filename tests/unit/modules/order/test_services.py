@@ -200,3 +200,161 @@ async def test_create_transaction_service(mock_session,sms_data, expected):
         await create_transaction_service(sms_data, mock_session)
 
     mock_session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_order_no_free_amount(fake_redis, mock_session, fake_user_data):
+    # Empty redis sets -> unique_amount returns None
+    order = await create_order_service(fake_user_data, 1510000, mock_session, fake_redis)
+    assert order is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_service_found(mock_session):
+    from app.modules.order.service import get_order_service
+    fake_order = MagicMock()
+    fake_order.id = 10
+    fake_order.user_id = 1
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = fake_order
+    mock_session.execute.return_value = mock_result
+
+    order = await get_order_service(order_id=10, user_id=1, session=mock_session)
+    assert order == fake_order
+
+
+@pytest.mark.asyncio
+async def test_get_order_service_not_found(mock_session):
+    from app.modules.order.service import get_order_service
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = None
+    mock_session.execute.return_value = mock_result
+
+    order = await get_order_service(order_id=999, user_id=1, session=mock_session)
+    assert order is None
+
+
+@pytest.mark.asyncio
+async def test_delete_order_success(mock_session):
+    fake_order = MagicMock()
+    fake_order.id = 5
+    fake_order.user_id = 2
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = fake_order
+    mock_session.execute.return_value = mock_result
+
+    await delete_order_service(order_id=5, user_id=2, session=mock_session)
+    mock_session.delete.assert_awaited_once_with(fake_order)
+
+
+@pytest.mark.asyncio
+async def test_get_all_orders(mock_session, fake_user_data):
+    from app.modules.order.service import get_all_orders
+    fake_order1 = MagicMock()
+    fake_order2 = MagicMock()
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [fake_order1, fake_order2]
+    mock_session.execute.return_value = mock_result
+
+    orders = await get_all_orders(fake_user_data, mock_session)
+    assert len(orders) == 2
+    assert orders == [fake_order1, fake_order2]
+
+
+@pytest.mark.asyncio
+async def test_get_unique_amount_from_postgres_empty_pending(mocker, mock_session):
+    from app.modules.order.service import get_unique_amount_from_postgres
+
+    async def empty_generator(*args, **kwargs):
+        if False:
+            yield []
+
+    mocker.patch("app.modules.order.service.get_all_pending_orders", side_effect=empty_generator)
+
+    amount = await get_unique_amount_from_postgres(mock_session)
+    assert amount is not None
+    assert 1500000 <= amount <= 1550000
+
+
+@pytest.mark.asyncio
+async def test_process_pending_payment_multiple_results_found(mock_session):
+    mock_result = MagicMock()
+    mock_result.scalar_one.side_effect = MultipleResultsFound("Duplicate rows")
+    mock_session.execute.return_value = mock_result
+
+    with pytest.raises(ValueError, match=r"MultipleResultsFound"):
+        await process_pending_payment(1520000, mock_session)
+
+
+@pytest.mark.asyncio
+async def test_process_pending_payment_success(mock_session):
+    payment = MagicMock()
+    payment.status = OrderStatus.PENDING
+    payment.order = MagicMock()
+    payment.order.status = OrderStatus.PENDING
+
+    mock_result = MagicMock()
+    mock_result.scalar_one.return_value = payment
+    mock_session.execute.return_value = mock_result
+
+    result = await process_pending_payment(1520000, mock_session)
+    assert result.status == OrderStatus.PAID
+    assert result.order.status == OrderStatus.PAID
+    mock_session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_outbox_event_service_success(mock_session):
+    data = {"amount": 1500000, "trace_id": "tx_xyz"}
+    event = await create_outbox_event_service(mock_session, data)
+
+    mock_session.add.assert_called_once()
+    mock_session.flush.assert_awaited_once()
+    assert event.data == data
+
+
+@pytest.mark.asyncio
+async def test_create_outbox_event_service_missing_data(mock_session):
+    with pytest.raises(ValueError, match="error_missing"):
+        await create_outbox_event_service(mock_session, {})
+
+
+@pytest.mark.asyncio
+async def test_create_outbox_event_service_integrity_error(mock_session):
+    mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("DB constraint violated"))
+    with pytest.raises(ValueError, match="error_duplicate_event"):
+        await create_outbox_event_service(mock_session, {"amount": 100})
+
+
+@pytest.mark.asyncio
+async def test_create_transaction_service_success(mock_session):
+    valid_sms_data = {
+        "sms_amount": 1500000,
+        "sms_inventory": 25000000,
+        "sms_date": "1405.03.12",
+        "sms_time": "12:30",
+        "webhook_payload": "valid raw content"
+    }
+    tx = await create_transaction_service(valid_sms_data, mock_session)
+
+    mock_session.add.assert_called_once()
+    mock_session.flush.assert_awaited_once()
+    assert tx.sms_amount == 1500000
+    assert tx.sms_date == "1405.03.12"
+
+
+@pytest.mark.asyncio
+async def test_create_transaction_service_duplicate_integrity_error(mock_session):
+    mock_session.flush.side_effect = IntegrityError("stmt", "params", Exception("Duplicate SMS constraint"))
+    valid_sms_data = {
+        "sms_amount": 1500000,
+        "sms_inventory": 25000000,
+        "sms_date": "1405.03.12",
+        "sms_time": "12:30",
+        "webhook_payload": "valid raw content"
+    }
+    with pytest.raises(ValueError, match="error_duplicate_transaction"):
+        await create_transaction_service(valid_sms_data, mock_session)

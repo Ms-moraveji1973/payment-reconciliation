@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import RefreshToken, User
 from .schema import UserTelegramSchema
+from .exceptions import (
+    UserAlreadyExistsError,
+    UsernameAlreadyExistsError,
+    TokenRevocationError,
+)
 
 
 async def create_telegram_user_service(user_data:UserTelegramSchema,session:AsyncSession) -> User:
@@ -15,8 +20,8 @@ async def create_telegram_user_service(user_data:UserTelegramSchema,session:Asyn
     session.add(user)
     try :
         await session.flush()
-    except IntegrityError:
-        raise ValueError("User already exists")
+    except IntegrityError as exc:
+        raise UserAlreadyExistsError("User already exists") from exc
     return user
 
 async def get_user_by_telegram_id(telegram_id:int,session:AsyncSession) -> User | None:
@@ -33,8 +38,8 @@ async def register_user_service(username:str, password:str, name:str, session:As
     session.add(new_user)
     try :
         await session.flush()
-    except IntegrityError:
-        raise ValueError("username already exists")
+    except IntegrityError as exc:
+        raise UsernameAlreadyExistsError("username already exists") from exc
     return new_user
 
 
@@ -89,8 +94,8 @@ async def revoke_refresh_token(session:AsyncSession,jti:str):
     result = await session.execute(stmt)
     try :
         await session.flush()
-    except IntegrityError:
-        raise ValueError("Error at revoking refresh token")
+    except IntegrityError as exc:
+        raise TokenRevocationError("Error at revoking refresh token") from exc
     return result
 
 
@@ -99,8 +104,8 @@ async def revoke_family_token(session : AsyncSession, family_id : uuid.UUID):
     revoke_rt = await session.execute(stmt)
     try :
         await session.flush()
-    except IntegrityError:
-        raise ValueError("Error at revoking family_id refresh token ")
+    except IntegrityError as exc:
+        raise TokenRevocationError("Error at revoking family_id refresh token ") from exc
     return revoke_rt
 
 
@@ -109,6 +114,6 @@ async def revoke_all_tokens(session : AsyncSession, user_id : int):
     result = await session.execute(stmt)
     try :
         await session.flush()
-    except IntegrityError:
-        raise ValueError("Error at deleting all refresh tokens")
+    except IntegrityError as exc:
+        raise TokenRevocationError("Error at deleting all refresh tokens") from exc
     return result

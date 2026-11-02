@@ -8,7 +8,7 @@ from typing import Dict, Callable, Optional
 from app.modules.order.queue_manager import MessageQueue, ConsumerGroup, Message
 from app.core.config import get_settings
 from app.modules.order.handlers import handle_payment
-from app.modules.order.execptions import IgnoreAndAckMessage, CriticalRejectMessage
+from app.modules.order.exceptions import IgnoreAndAckMessage, CriticalRejectMessage
 from app.core.logger import log
 config = get_settings()
 
@@ -47,6 +47,7 @@ class Worker:
             "trace_id": trace_id,
             "message_id": message.id,
             "amount": message.data.get("amount"),
+            "transaction_id" : message.data.get("transaction_id"),
             "attempts": message.attempts
         }
         log.info("starting message processing", context=context)
@@ -61,8 +62,8 @@ class Worker:
         except IgnoreAndAckMessage:
             return True
 
-        except CriticalRejectMessage:
-            log.error(f"Duplicate amounts in message : {message.id}", context=context)
+        except CriticalRejectMessage as e:
+            log.error(f"Critical rejection for message {message.id}: {e}", context=context)
             return False
 
         except Exception as e:
@@ -76,6 +77,7 @@ class Worker:
             "trace_id": trace_id,
             "message_id": message.id,
             "amount": message.data.get("amount"),
+            "transaction_id" : message.data.get("transaction_id"),
             "current_attempt": message.attempts,
             "max_retries": self.max_retries
         }

@@ -56,6 +56,8 @@ class PaymentIntent(Base):
                                                 nullable=False)
     expired_at : Mapped[datetime] = mapped_column(DateTime(timezone=True),server_default=text("CURRENT_TIMESTAMP + INTERVAL '1 day'"),
                                                   nullable=False)
+    sms_transaction_id: Mapped[int | None] = mapped_column(ForeignKey("sms_transactions.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
+    sms_transaction: Mapped["SMSTransaction"] = relationship("SMSTransaction")
     order : Mapped["Order"] = relationship("Order",back_populates="payment_intent")
     __table_args__ = (
                 Index(

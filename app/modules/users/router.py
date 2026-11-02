@@ -1,10 +1,17 @@
 from typing import Annotated
 from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta, timezone
 from fastapi.security import OAuth2PasswordRequestForm
 from jwt.exceptions import (DecodeError, InvalidSignatureError, ExpiredSignatureError, InvalidTokenError)
 import redis.asyncio as redis
+
+from .exceptions import (
+    UserAlreadyExistsError,
+    UsernameAlreadyExistsError,
+    RefreshTokenAlreadyExistsError,
+)
 
 from .schema import (UserTelegramSchema, UserTelegramResponseSchema,
                      UserRegisterSchema, UserResponseSchema,
@@ -48,7 +55,7 @@ async def create_telegram_user(user : UserTelegramSchema, session : AsyncSession
         await session.commit()
         await session.refresh(new_user)
         return new_user
-    except ValueError:
+    except UserAlreadyExistsError:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,detail="User already exists")
 
@@ -59,7 +66,7 @@ async def register_user(user : UserRegisterSchema, session : AsyncSession = Depe
         new_user = await register_user_service(user.username, user.password, user.name, session)
         await session.commit()
         return new_user
-    except ValueError :
+    except UsernameAlreadyExistsError:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
 
@@ -86,7 +93,7 @@ async def login_user(form_data : Annotated[OAuth2PasswordRequestForm,Depends()],
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refresh token already exists")
     try :
         await session.commit()
-    except ValueError :
+    except (IntegrityError, RefreshTokenAlreadyExistsError):
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refresh token already exists")
 

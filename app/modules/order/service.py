@@ -1,11 +1,12 @@
 from pydantic import BaseModel
 from typing import Annotated
+from enum import Enum
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError, MultipleResultsFound, NoResultFound
 from sqlalchemy.orm import joinedload
 import redis.asyncio as redis
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, text
 import random
 import re
 import uuid
@@ -13,36 +14,100 @@ import uuid
 from .models import Order, PaymentIntent, OrderStatus, SMSTransaction, OutBoxOrderEvent
 from app.modules.users.models import User
 from app.core.logger import log
+from app.core.exceptions import DatabaseError
 from .queue_manager import MessageQueue
-from .execptions import OutBoxEventRedisException
+from .exceptions import (
+    OutBoxEventRedisException,
+    OrderNotFoundError,
+    DuplicateUniqueAmountError,
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+    InvalidSMSDataError,
+    DuplicateSMSTransactionError,
+    DuplicateOutboxEventError,
+    DuplicatePaymentTransactionError
+)
 
 
-async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
-    unique_amount = await get_unique_amount(session, redis_client)
-    log.info(f"unique amount equals : {unique_amount}")
-    if not unique_amount :
-        amounts_count = await redis_client.scard("amounts")
-        free_amounts_count = await redis_client.scard("free_amounts")
-        log.info(f"amounts count: {amounts_count}")
-        log.info(f" free_amounts count: {free_amounts_count}")
-        return None
-    try:
-        new_order = Order(user_id=user.id, amount=amount,
-                        payment_intent=PaymentIntent(status=OrderStatus.PENDING,
-                                                    base_amount=amount,
-                                                    exact_amount=unique_amount ))
-        session.add(new_order)
-        await session.flush()
-        return new_order
+class AmountSource(str, Enum):
+    REDIS = "REDIS"
+    POSTGRES = "POSTGRES"
 
-    except IntegrityError :
-        await redis_client.smove("pending_orders","amounts",unique_amount)
-        await redis_client.sadd("free_amounts",unique_amount)
-        raise ValueError("Duplicate unique amount")
-    except Exception:
-        await redis_client.smove("pending_orders","amounts",unique_amount)
-        await redis_client.sadd("free_amounts",unique_amount)
-        raise ValueError("Database error occurred ")
+
+class AllocatedAmount(int):
+    source: AmountSource
+
+    def __new__(cls, value: int, source: AmountSource = AmountSource.REDIS):
+        instance = super().__new__(cls, value)
+        instance.source = source
+        return instance
+
+
+async def create_order_service(
+    user: User,
+    amount: int,
+    session: AsyncSession,
+    redis_client: redis.Redis,
+    max_retries: int = 3
+):
+    for attempt in range(max_retries):
+        unique_amount = await get_unique_amount(session, redis_client, base_amount=amount)
+        log.info(f"unique amount equals : {unique_amount}")
+        if not unique_amount:
+            try:
+                amounts_count = await redis_client.scard("amounts")
+                free_amounts_count = await redis_client.scard("free_amounts")
+                log.info(f"amounts count: {amounts_count}")
+                log.info(f" free_amounts count: {free_amounts_count}")
+            except Exception:
+                log.warning("could not retrieve redis amounts statistics")
+            return None
+
+        source = getattr(unique_amount, "source", AmountSource.REDIS)
+
+        try:
+            async with session.begin_nested():
+                new_order = Order(
+                    user_id=user.id,
+                    amount=amount,
+                    payment_intent=PaymentIntent(
+                        status=OrderStatus.PENDING,
+                        base_amount=amount,
+                        exact_amount=int(unique_amount)
+                    )
+                )
+                session.add(new_order)
+                await session.flush()
+            return new_order
+
+        except IntegrityError as exc:
+            # Compensate only if amount came from Redis
+            if source == AmountSource.REDIS:
+                try:
+                    await redis_client.smove("pending_orders", "amounts", unique_amount)
+                    await redis_client.sadd("free_amounts", unique_amount)
+                except Exception as r_err:
+                    log.error(f"failed to compensate redis: {r_err}")
+                raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
+
+            # PostgreSQL fallback path: retry on collision if attempts remain
+            log.warning(
+                f"Conflict on exact_amount {unique_amount} from postgres fallback (attempt {attempt + 1}/{max_retries})"
+            )
+            if attempt < max_retries - 1:
+                continue
+            raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
+
+        except Exception as exc:
+            if source == AmountSource.REDIS:
+                try:
+                    await redis_client.smove("pending_orders", "amounts", unique_amount)
+                    await redis_client.sadd("free_amounts", unique_amount)
+                except Exception as r_err:
+                    log.error(f"failed to compensate redis: {r_err}")
+            raise DatabaseError("Database error occurred") from exc
+
+    return None
 
 
 
@@ -58,7 +123,7 @@ async def delete_order_service(order_id:int,user_id:int,session:AsyncSession):
     result = await session.execute(get_order_by_user)
     order = result.scalars().first()
     if not order:
-        raise ValueError("Order not found")
+        raise OrderNotFoundError("Order not found")
     await session.delete(order)
 
 
@@ -108,83 +173,119 @@ async def get_pending_orders(session:AsyncSession, limit: int, cursor:int):
     }
 
 
-async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
+async def get_unique_amount(
+    session: AsyncSession,
+    redis_client: redis.Redis,
+    base_amount: int | None = None
+) -> AllocatedAmount | None:
     try:
         given_amount = await redis_client.spop('free_amounts')
         log.info(f"{given_amount} was taken from free_amounts")
-        if given_amount :
-            await redis_client.smove("amounts",'pending_orders',given_amount)
-            return int(given_amount)
-    except RedisError :
-        fallback_amount = await get_unique_amount_from_postgres(session)
+        if given_amount:
+            await redis_client.smove("amounts", 'pending_orders', given_amount)
+            return AllocatedAmount(int(given_amount), AmountSource.REDIS)
+    except RedisError:
+        fallback_amount = await get_unique_amount_from_postgres(session, base_amount=base_amount)
         log.warning("fallback is called ")
-        return fallback_amount
+        if fallback_amount is not None:
+            return AllocatedAmount(fallback_amount, AmountSource.POSTGRES)
+        return None
     return None
 
 
 
-async def get_unique_amount_from_postgres(session: AsyncSession):
-    pending_orders = set()
-    async for orders in get_all_pending_orders(session) :
-        for order in orders:
-            pending_orders.add(order.exact_amount)
-    if not pending_orders:
-        return random.randint(1500000, 1550000)
-    possible_range = set(range(min(pending_orders), max(pending_orders)+200))
-    available_amounts = list(possible_range - pending_orders)
-    unique_amount = random.choice(available_amounts)
-    if unique_amount:
+async def get_unique_amount_from_postgres(
+    session: AsyncSession,
+    base_amount: int | None = None,
+    window: int = 500
+) -> int | None:
+    if base_amount is None:
+        start_val, end_val = 1500000, 1550000
+    else:
+        start_val, end_val = base_amount + 1, base_amount + window
+
+    query = text(
+        """
+        SELECT candidate_amount
+        FROM generate_series(CAST(:start_val AS integer), CAST(:end_val AS integer)) AS candidate_amount
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM payment_intent
+            WHERE status = 'PENDING'
+              AND exact_amount = candidate_amount
+        )
+        ORDER BY random()
+        LIMIT 1;
+        """
+    )
+    result = await session.execute(query, {"start_val": start_val, "end_val": end_val})
+    unique_amount = result.scalar_one_or_none()
+    if unique_amount is not None:
         log.info(f"unique amount from postgres is : {unique_amount}")
-        return unique_amount
+        return int(unique_amount)
     return None
 
 
 
-async def process_pending_payment(amount:int, session: AsyncSession):
+async def process_pending_payment(amount:int, sms_transaction_id: int, session: AsyncSession):
+    if not sms_transaction_id:
+        raise InvalidSMSDataError("transaction_id is required for payment processing")
+
+    existing_stmt = select(PaymentIntent).where(PaymentIntent.sms_transaction_id == sms_transaction_id)
+    existing_result = await session.execute(existing_stmt)
+    already_processed = existing_result.scalar_one_or_none()
+    if already_processed :
+        log.info(f"SMS {sms_transaction_id} was already processed for order {already_processed.order_id}. Skipping.")
+        return already_processed, False
+
     stmt = select(PaymentIntent).with_for_update(nowait=False).options(joinedload(PaymentIntent.order, innerjoin=True)).where(PaymentIntent.exact_amount == amount, PaymentIntent.status == OrderStatus.PENDING)
     payment_result = await session.execute(stmt)
     try:
         payment = payment_result.scalar_one()
         payment.status = OrderStatus.PAID
         payment.order.status = OrderStatus.PAID
+        payment.sms_transaction_id = sms_transaction_id
         await session.flush()
         log.info("the transaction amount has been found and changed the status to PAID",status="transaction_found")
-        return payment
+        return payment, True
 
-    except NoResultFound:
-        raise ValueError("NoResultFound")
+    except NoResultFound as exc:
+        raise PaymentIntentNotFoundError(f"Payment intent for amount {amount} not found") from exc
 
-    except MultipleResultsFound:
-        raise ValueError("MultipleResultsFound")
+    except MultipleResultsFound as exc:
+        raise DuplicatePaymentIntentError(f"Multiple payment intents found for amount {amount}") from exc
 
+    except IntegrityError as exc:
+        log.warning(f"Integrity conflict on SMS {sms_transaction_id}: already processed concurrently.")
+        raise DuplicatePaymentTransactionError(f"SMS {sms_transaction_id} was processed concurrently") from exc
 
 async def create_transaction_service(sms_data: dict, session:AsyncSession):
-    amount = sms_data["sms_amount"]
-    inventory = sms_data["sms_inventory"]
-    date = sms_data["sms_date"]
-    time = sms_data["sms_time"]
-    webhook_payload = sms_data["webhook_payload"]
+    amount = sms_data.get("sms_amount")
+    inventory = sms_data.get("sms_inventory")
+    date = sms_data.get("sms_date")
+    time = sms_data.get("sms_time")
+    webhook_payload = sms_data.get("webhook_payload")
     if None in (amount, inventory, date, time, webhook_payload):
-        raise ValueError("error_missing_fields")
+        raise InvalidSMSDataError("error_missing_fields")
     new_transaction = SMSTransaction(sms_amount=amount, sms_inventory=inventory, sms_date=date, sms_time=time, webhook_payload=webhook_payload)
     session.add(new_transaction)
     try:
         await session.flush()
         return new_transaction
-    except IntegrityError:
-        raise ValueError("error_duplicate_transaction")
+    except IntegrityError as exc:
+        raise DuplicateSMSTransactionError("error_duplicate_transaction") from exc
 
 
 async def create_outbox_event_service(session:AsyncSession, transaction_data: dict):
     if not transaction_data:
-        raise ValueError("error_missing")
+        raise InvalidSMSDataError("error_missing")
     new_event = OutBoxOrderEvent(data=transaction_data)
     session.add(new_event)
     try:
         await session.flush()
         return new_event
-    except IntegrityError:
-        raise ValueError("error_duplicate_event")
+    except IntegrityError as exc:
+        raise DuplicateOutboxEventError("error_duplicate_event") from exc
 
 
 
@@ -195,6 +296,7 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
         trace_id = sms_data["trace_id"]
         transaction_id = transaction.id
         transaction_data = {
+            "transaction_id": transaction_id,
             "trace_id":trace_id,
             "amount":amount,
             "type":"payment"
@@ -214,26 +316,14 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
             "transaction_id": transaction_id
         }
 
-    except ValueError as ev:
+    except (InvalidSMSDataError, DuplicateSMSTransactionError, DuplicateOutboxEventError):
         await session.rollback()
-        error_msg = str(ev)
+        raise
 
-        if error_msg == "error_duplicate_event":
-            raise ValueError("error_duplicate_event")
-
-        elif error_msg == "error_duplicate_transaction":
-            raise ValueError("error_duplicate_transaction")
-
-        elif error_msg == "error_missing_fields":
-            raise ValueError("error_missing_fields")
-
-        else:
-            raise ValueError("unknown_error")
-
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
-        log.error("transaction and order event failed")
-        raise ValueError('database_error')
+        log.error("transaction and order event failed due to database constraint")
+        raise DatabaseError("database_error") from exc
 
 
 

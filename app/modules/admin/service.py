@@ -11,6 +11,7 @@ from app.modules.users.models import User
 from app.modules.order.models import PaymentIntent
 from app.modules.users.security import get_current_user
 from app.modules.order.queue_manager import MessageQueue
+from app.modules.order.exceptions import PaymentIntentNotFoundError
 from .dlq_manager import DeadLetterQueue
 from app.core.logger import log
 from app.modules.order.schema import OrderStatus
@@ -43,5 +44,5 @@ async def handle_pending_payment(order_id:int, payment_id:int, session: AsyncSes
         log.info("The order status has been changed to PAID by admin",status="PAID")
         return payment
 
-    except NoResultFound:
-        raise ValueError("NoResultFound")
+    except NoResultFound as exc:
+        raise PaymentIntentNotFoundError(f"Payment intent {payment_id} for order {order_id} not found") from exc

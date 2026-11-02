@@ -9,6 +9,7 @@ from app.db.redis_db import get_redis
 
 from app.modules.users.models import User
 from app.modules.order.service import get_pending_orders
+from app.modules.order.exceptions import PaymentIntentNotFoundError
 from .service import get_current_admin_user, get_dead_letter_queue, handle_pending_payment
 from .dlq_manager import DeadLetterQueue
 from .schema import PaginatedOrdersResponse
@@ -49,12 +50,9 @@ async def confirm_payment(order_id: int , payment_id: int, session: Annotated[As
         update_payment = await handle_pending_payment(order_id, payment_id, session, redis_client)
         await session.commit()
         return update_payment
-    except ValueError as v:
-        error = str(v)
+    except PaymentIntentNotFoundError as exc:
         await session.rollback()
-
-        if error == "NoResultFound":
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
     except Exception:
         await session.rollback()

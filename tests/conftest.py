@@ -3,6 +3,8 @@ import fakeredis.aioredis
 import pytest_asyncio
 
 from unittest.mock import AsyncMock, MagicMock
+from contextlib import asynccontextmanager
+import app.modules.order.models
 from app.modules.users.models import User
 
 @pytest_asyncio.fixture
@@ -19,6 +21,11 @@ async def fake_redis():
 def mock_session():
     session = AsyncMock()
     session.add = MagicMock()
+
+    @asynccontextmanager
+    async def fake_nested():
+        yield
+    session.begin_nested = MagicMock(side_effect=fake_nested)
     return session
 
 @pytest.fixture

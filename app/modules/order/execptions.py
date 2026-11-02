@@ -1,17 +1,38 @@
+"""Backward-compatibility module for misspelled 'execptions.py'.
 
-class WorkerException(Exception):
-    pass
+Prefer importing from 'app.modules.order.exceptions'.
+"""
 
+from app.modules.order.exceptions import (
+    WorkerException,
+    IgnoreAndAckMessage,
+    CriticalRejectMessage,
+    OutBoxEventRedisException,
+    InvalidOutboxPayload,
+    OrderNotFoundError,
+    NoFreeAmountAvailableError,
+    DuplicateUniqueAmountError,
+    PaymentIntentNotFoundError,
+    DuplicatePaymentIntentError,
+    InvalidSMSDataError,
+    DuplicateSMSTransactionError,
+    DuplicateOutboxEventError,
+    OutboxEventNotFoundError,
+)
 
-class IgnoreAndAckMessage(WorkerException):
-    pass
-
-class CriticalRejectMessage(WorkerException):
-    pass
-
-
-class OutBoxEventRedisException(Exception):
-    pass
-
-class InvalidOutboxPayload(Exception):
-    pass
+__all__ = [
+    "WorkerException",
+    "IgnoreAndAckMessage",
+    "CriticalRejectMessage",
+    "OutBoxEventRedisException",
+    "InvalidOutboxPayload",
+    "OrderNotFoundError",
+    "NoFreeAmountAvailableError",
+    "DuplicateUniqueAmountError",
+    "PaymentIntentNotFoundError",
+    "DuplicatePaymentIntentError",
+    "InvalidSMSDataError",
+    "DuplicateSMSTransactionError",
+    "DuplicateOutboxEventError",
+    "OutboxEventNotFoundError",
+]

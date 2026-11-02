@@ -25,7 +25,13 @@ from .service import (
     parse_sms_transaction,
     handle_transaction_service
 )
-from .execptions import OutBoxEventRedisException
+from .exceptions import (
+    DuplicateUniqueAmountError,
+    OrderNotFoundError,
+    DuplicateSMSTransactionError,
+    InvalidSMSDataError,
+    DuplicateOutboxEventError,
+)
 
 from app.modules.users.security import oauth2_scheme
 from app.core.config import get_settings
@@ -46,7 +52,7 @@ async def create_order(order_data:OrderSchema, current_user: Annotated[User, Dep
         return create_order
     except HTTPException:
         raise
-    except ValueError:
+    except DuplicateUniqueAmountError:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Duplicate unique amount")
 
@@ -79,7 +85,7 @@ async def delete_order(current_user: Annotated[User, Depends(get_current_user)],
     try :
         await delete_order_service(order_id,current_user.id,session)
         await session.commit()
-    except ValueError:
+    except OrderNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail="Order not found")
     return None
 
@@ -100,27 +106,13 @@ async def receive_transaction(sms_transaction:SmsWebhookPayload, token:Annotated
         try:
             result = await handle_transaction_service(sms_data, session, redis_client)
             return result
-        except ValueError as v:
-            await session.rollback()
-            error_message = str(v)
-            if error_message == "error_duplicate_transaction":
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data already exists")
-
-            elif error_message == "error_missing_fields":
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
-
-            elif error_message == "error_duplicate_event":
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The event data already exists")
-
-            else:
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
+        except DuplicateSMSTransactionError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data already exists")
+        except InvalidSMSDataError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The transaction data is incomplete")
+        except DuplicateOutboxEventError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The event data already exists")
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Error")
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The TOKEN is invalid")
-
-
-"""        elif error_message == "NoResultFound":
-            raise HTTPException(status_code=status.HTTP_204_NO_CONTENT, detail="No transaction amount matched")
-
-        elif error_message == "MultipleResultsFound":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There are the same amounts in DB")
-"""

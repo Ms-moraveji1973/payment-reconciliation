@@ -1,11 +1,12 @@
 from pydantic import BaseModel
 from typing import Annotated
+from enum import Enum
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError, MultipleResultsFound, NoResultFound
 from sqlalchemy.orm import joinedload
 import redis.asyncio as redis
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, text
 import random
 import re
 import uuid
@@ -28,32 +29,85 @@ from .exceptions import (
 )
 
 
-async def create_order_service(user:User, amount:int, session: AsyncSession, redis_client: redis.Redis):
-    unique_amount = await get_unique_amount(session, redis_client)
-    log.info(f"unique amount equals : {unique_amount}")
-    if not unique_amount :
-        amounts_count = await redis_client.scard("amounts")
-        free_amounts_count = await redis_client.scard("free_amounts")
-        log.info(f"amounts count: {amounts_count}")
-        log.info(f" free_amounts count: {free_amounts_count}")
-        return None
-    try:
-        new_order = Order(user_id=user.id, amount=amount,
-                        payment_intent=PaymentIntent(status=OrderStatus.PENDING,
-                                                    base_amount=amount,
-                                                    exact_amount=unique_amount ))
-        session.add(new_order)
-        await session.flush()
-        return new_order
+class AmountSource(str, Enum):
+    REDIS = "REDIS"
+    POSTGRES = "POSTGRES"
 
-    except IntegrityError as exc:
-        await redis_client.smove("pending_orders","amounts",unique_amount)
-        await redis_client.sadd("free_amounts",unique_amount)
-        raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
-    except Exception as exc:
-        await redis_client.smove("pending_orders","amounts",unique_amount)
-        await redis_client.sadd("free_amounts",unique_amount)
-        raise DatabaseError("Database error occurred") from exc
+
+class AllocatedAmount(int):
+    source: AmountSource
+
+    def __new__(cls, value: int, source: AmountSource = AmountSource.REDIS):
+        instance = super().__new__(cls, value)
+        instance.source = source
+        return instance
+
+
+async def create_order_service(
+    user: User,
+    amount: int,
+    session: AsyncSession,
+    redis_client: redis.Redis,
+    max_retries: int = 3
+):
+    for attempt in range(max_retries):
+        unique_amount = await get_unique_amount(session, redis_client, base_amount=amount)
+        log.info(f"unique amount equals : {unique_amount}")
+        if not unique_amount:
+            try:
+                amounts_count = await redis_client.scard("amounts")
+                free_amounts_count = await redis_client.scard("free_amounts")
+                log.info(f"amounts count: {amounts_count}")
+                log.info(f" free_amounts count: {free_amounts_count}")
+            except Exception:
+                log.warning("could not retrieve redis amounts statistics")
+            return None
+
+        source = getattr(unique_amount, "source", AmountSource.REDIS)
+
+        try:
+            async with session.begin_nested():
+                new_order = Order(
+                    user_id=user.id,
+                    amount=amount,
+                    payment_intent=PaymentIntent(
+                        status=OrderStatus.PENDING,
+                        base_amount=amount,
+                        exact_amount=int(unique_amount)
+                    )
+                )
+                session.add(new_order)
+                await session.flush()
+            return new_order
+
+        except IntegrityError as exc:
+            # Compensate only if amount came from Redis
+            if source == AmountSource.REDIS:
+                try:
+                    await redis_client.smove("pending_orders", "amounts", unique_amount)
+                    await redis_client.sadd("free_amounts", unique_amount)
+                except Exception as r_err:
+                    log.error(f"failed to compensate redis: {r_err}")
+                raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
+
+            # PostgreSQL fallback path: retry on collision if attempts remain
+            log.warning(
+                f"Conflict on exact_amount {unique_amount} from postgres fallback (attempt {attempt + 1}/{max_retries})"
+            )
+            if attempt < max_retries - 1:
+                continue
+            raise DuplicateUniqueAmountError("Duplicate unique amount") from exc
+
+        except Exception as exc:
+            if source == AmountSource.REDIS:
+                try:
+                    await redis_client.smove("pending_orders", "amounts", unique_amount)
+                    await redis_client.sadd("free_amounts", unique_amount)
+                except Exception as r_err:
+                    log.error(f"failed to compensate redis: {r_err}")
+            raise DatabaseError("Database error occurred") from exc
+
+    return None
 
 
 
@@ -119,34 +173,56 @@ async def get_pending_orders(session:AsyncSession, limit: int, cursor:int):
     }
 
 
-async def get_unique_amount(session: AsyncSession, redis_client:redis.Redis) -> int | None :
+async def get_unique_amount(
+    session: AsyncSession,
+    redis_client: redis.Redis,
+    base_amount: int | None = None
+) -> AllocatedAmount | None:
     try:
         given_amount = await redis_client.spop('free_amounts')
         log.info(f"{given_amount} was taken from free_amounts")
-        if given_amount :
-            await redis_client.smove("amounts",'pending_orders',given_amount)
-            return int(given_amount)
-    except RedisError :
-        fallback_amount = await get_unique_amount_from_postgres(session)
+        if given_amount:
+            await redis_client.smove("amounts", 'pending_orders', given_amount)
+            return AllocatedAmount(int(given_amount), AmountSource.REDIS)
+    except RedisError:
+        fallback_amount = await get_unique_amount_from_postgres(session, base_amount=base_amount)
         log.warning("fallback is called ")
-        return fallback_amount
+        if fallback_amount is not None:
+            return AllocatedAmount(fallback_amount, AmountSource.POSTGRES)
+        return None
     return None
 
 
 
-async def get_unique_amount_from_postgres(session: AsyncSession):
-    pending_orders = set()
-    async for orders in get_all_pending_orders(session) :
-        for order in orders:
-            pending_orders.add(order.exact_amount)
-    if not pending_orders:
-        return random.randint(1500000, 1550000)
-    possible_range = set(range(min(pending_orders), max(pending_orders)+200))
-    available_amounts = list(possible_range - pending_orders)
-    unique_amount = random.choice(available_amounts)
-    if unique_amount:
+async def get_unique_amount_from_postgres(
+    session: AsyncSession,
+    base_amount: int | None = None,
+    window: int = 500
+) -> int | None:
+    if base_amount is None:
+        start_val, end_val = 1500000, 1550000
+    else:
+        start_val, end_val = base_amount + 1, base_amount + window
+
+    query = text(
+        """
+        SELECT candidate_amount
+        FROM generate_series(CAST(:start_val AS integer), CAST(:end_val AS integer)) AS candidate_amount
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM payment_intent
+            WHERE status = 'PENDING'
+              AND exact_amount = candidate_amount
+        )
+        ORDER BY random()
+        LIMIT 1;
+        """
+    )
+    result = await session.execute(query, {"start_val": start_val, "end_val": end_val})
+    unique_amount = result.scalar_one_or_none()
+    if unique_amount is not None:
         log.info(f"unique amount from postgres is : {unique_amount}")
-        return unique_amount
+        return int(unique_amount)
     return None
 
 

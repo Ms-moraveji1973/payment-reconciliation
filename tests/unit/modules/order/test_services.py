@@ -282,15 +282,102 @@ async def test_get_all_orders(mock_session, fake_user_data):
 async def test_get_unique_amount_from_postgres_empty_pending(mocker, mock_session):
     from app.modules.order.service import get_unique_amount_from_postgres
 
-    async def empty_generator(*args, **kwargs):
-        if False:
-            yield []
-
-    mocker.patch("app.modules.order.service.get_all_pending_orders", side_effect=empty_generator)
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = 1523456
+    mock_session.execute.return_value = mock_result
 
     amount = await get_unique_amount_from_postgres(mock_session)
     assert amount is not None
     assert 1500000 <= amount <= 1550000
+    mock_session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_unique_amount_from_postgres_with_base_amount(mock_session):
+    from app.modules.order.service import get_unique_amount_from_postgres
+
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = 1510042
+    mock_session.execute.return_value = mock_result
+
+    amount = await get_unique_amount_from_postgres(mock_session, base_amount=1510000, window=200)
+    assert amount == 1510042
+    mock_session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_order_fallback_postgres_success(fake_redis, mock_session, fake_user_data, mocker):
+    from app.modules.order.service import create_order_service, AmountSource, AllocatedAmount
+    fake_redis.spop = AsyncMock(side_effect=RedisError())
+    fake_redis.smove = AsyncMock()
+    fake_redis.sadd = AsyncMock()
+
+    mocker.patch(
+        "app.modules.order.service.get_unique_amount_from_postgres",
+        return_value=1510025
+    )
+
+    order = await create_order_service(fake_user_data, 1510000, mock_session, fake_redis)
+
+    assert order is not None
+    assert order.payment_intent.exact_amount == 1510025
+    assert order.amount == 1510000
+    # Redis compensation should NOT be called on success or during fallback
+    fake_redis.smove.assert_not_called()
+    fake_redis.sadd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_order_fallback_postgres_collision_and_retry(fake_redis, mock_session, fake_user_data, mocker):
+    from app.modules.order.service import create_order_service
+    fake_redis.spop = AsyncMock(side_effect=RedisError())
+    fake_redis.smove = AsyncMock()
+    fake_redis.sadd = AsyncMock()
+
+    # First attempt returns 1510001 (collides), second attempt returns 1510002 (succeeds)
+    mock_postgres = mocker.patch(
+        "app.modules.order.service.get_unique_amount_from_postgres",
+        side_effect=[1510001, 1510002]
+    )
+
+    # First flush raises IntegrityError, second flush succeeds
+    mock_session.flush = AsyncMock(
+        side_effect=[IntegrityError("stmt", "params", Exception("unique violation")), None]
+    )
+
+    order = await create_order_service(fake_user_data, 1510000, mock_session, fake_redis, max_retries=3)
+
+    assert order is not None
+    assert order.payment_intent.exact_amount == 1510002
+    assert mock_postgres.call_count == 2
+    # Redis compensation must never be called when Redis was down
+    fake_redis.smove.assert_not_called()
+    fake_redis.sadd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_order_fallback_postgres_exhausted_retries(fake_redis, mock_session, fake_user_data, mocker):
+    from app.modules.order.service import create_order_service
+    fake_redis.spop = AsyncMock(side_effect=RedisError())
+    fake_redis.smove = AsyncMock()
+    fake_redis.sadd = AsyncMock()
+
+    mocker.patch(
+        "app.modules.order.service.get_unique_amount_from_postgres",
+        side_effect=[1510001, 1510002, 1510003]
+    )
+
+    # All flushes fail with IntegrityError
+    mock_session.flush = AsyncMock(
+        side_effect=IntegrityError("stmt", "params", Exception("unique violation"))
+    )
+
+    with pytest.raises(DuplicateUniqueAmountError, match=r"Duplicate unique amount"):
+        await create_order_service(fake_user_data, 1510000, mock_session, fake_redis, max_retries=3)
+
+    # Ensure Redis was never called during fallback failures
+    fake_redis.smove.assert_not_called()
+    fake_redis.sadd.assert_not_called()
 
 
 @pytest.mark.asyncio

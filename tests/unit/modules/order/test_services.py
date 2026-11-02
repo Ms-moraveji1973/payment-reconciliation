@@ -131,13 +131,16 @@ async def test_delete_order(mock_session, fake_user_data, order_id:int=129):
 
 @pytest.mark.asyncio
 async def test_processing_pending_payment(mock_session, amount=1219518):
-    mock_result = MagicMock()
-    mock_result.scalar_one.side_effect = NoResultFound("stmt","params",Exception("DB constraint violated"))
-    mock_session.execute.return_value = mock_result
+    existing_result = MagicMock()
+    existing_result.scalar_one_or_none.return_value = None
 
+    payment_result = MagicMock()
+    payment_result.scalar_one.side_effect = NoResultFound("stmt", "params", Exception("DB constraint violated"))
 
-    with pytest.raises(PaymentIntentNotFoundError):
-        await process_pending_payment(amount, mock_session)
+    mock_session.execute.side_effect = [existing_result, payment_result]
+
+    with pytest.raises(PaymentIntentNotFoundError, match="Payment intent for amount 1219518 not found"):
+        await process_pending_payment(amount, sms_transaction_id=99, session=mock_session)
 
 
 @pytest.mark.asyncio
@@ -151,6 +154,7 @@ async def test_handle_transaction(mocker, mock_session, fake_redis):
     mocker_create_tra.return_value = fake_transaction
 
     transaction_data =  {
+                "transaction_id": fake_transaction.id,
                 "trace_id":fake_transaction.trace_id,
                 "amount":fake_transaction.sms_amount,
                 "type":"payment"
@@ -167,6 +171,7 @@ async def test_handle_transaction(mocker, mock_session, fake_redis):
     assert handle_transaction['status'] == 'accepted'
     assert handle_transaction['transaction_id'] == 131
 
+    mocker_outbox.assert_awaited_once_with(mock_session, transaction_data)
     mock_session.commit.assert_awaited_once()
 
 
@@ -290,12 +295,16 @@ async def test_get_unique_amount_from_postgres_empty_pending(mocker, mock_sessio
 
 @pytest.mark.asyncio
 async def test_process_pending_payment_multiple_results_found(mock_session):
-    mock_result = MagicMock()
-    mock_result.scalar_one.side_effect = MultipleResultsFound("Duplicate rows")
-    mock_session.execute.return_value = mock_result
+    existing_result = MagicMock()
+    existing_result.scalar_one_or_none.return_value = None
 
-    with pytest.raises(DuplicatePaymentIntentError):
-        await process_pending_payment(1520000, mock_session)
+    payment_result = MagicMock()
+    payment_result.scalar_one.side_effect = MultipleResultsFound("Duplicate rows")
+
+    mock_session.execute.side_effect = [existing_result, payment_result]
+
+    with pytest.raises(DuplicatePaymentIntentError, match="Multiple payment intents found"):
+        await process_pending_payment(1520000, sms_transaction_id=99, session=mock_session)
 
 
 @pytest.mark.asyncio
@@ -305,14 +314,44 @@ async def test_process_pending_payment_success(mock_session):
     payment.order = MagicMock()
     payment.order.status = OrderStatus.PENDING
 
-    mock_result = MagicMock()
-    mock_result.scalar_one.return_value = payment
-    mock_session.execute.return_value = mock_result
+    existing_result = MagicMock()
+    existing_result.scalar_one_or_none.return_value = None
 
-    result = await process_pending_payment(1520000, mock_session)
-    assert result.status == OrderStatus.PAID
-    assert result.order.status == OrderStatus.PAID
+    payment_result = MagicMock()
+    payment_result.scalar_one.return_value = payment
+
+    mock_session.execute.side_effect = [existing_result, payment_result]
+
+    result_payment, is_new = await process_pending_payment(1520000, sms_transaction_id=77, session=mock_session)
+    assert is_new is True
+    assert result_payment.status == OrderStatus.PAID
+    assert result_payment.order.status == OrderStatus.PAID
+    assert result_payment.sms_transaction_id == 77
     mock_session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_pending_payment_missing_transaction_id(mock_session):
+    with pytest.raises(InvalidSMSDataError, match="transaction_id is required"):
+        await process_pending_payment(1520000, sms_transaction_id=None, session=mock_session)
+
+    with pytest.raises(InvalidSMSDataError, match="transaction_id is required"):
+        await process_pending_payment(1520000, sms_transaction_id=0, session=mock_session)
+
+
+@pytest.mark.asyncio
+async def test_process_pending_payment_already_processed_idempotent(mock_session):
+    already_processed = MagicMock()
+    already_processed.order_id = 456
+
+    existing_result = MagicMock()
+    existing_result.scalar_one_or_none.return_value = already_processed
+    mock_session.execute.return_value = existing_result
+
+    result_payment, is_new = await process_pending_payment(1520000, sms_transaction_id=88, session=mock_session)
+    assert is_new is False
+    assert result_payment == already_processed
+    mock_session.flush.assert_not_called()
 
 
 @pytest.mark.asyncio

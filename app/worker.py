@@ -47,6 +47,7 @@ class Worker:
             "trace_id": trace_id,
             "message_id": message.id,
             "amount": message.data.get("amount"),
+            "transaction_id" : message.data.get("transaction_id"),
             "attempts": message.attempts
         }
         log.info("starting message processing", context=context)
@@ -76,6 +77,7 @@ class Worker:
             "trace_id": trace_id,
             "message_id": message.id,
             "amount": message.data.get("amount"),
+            "transaction_id" : message.data.get("transaction_id"),
             "current_attempt": message.attempts,
             "max_retries": self.max_retries
         }

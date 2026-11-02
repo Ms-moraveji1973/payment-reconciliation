@@ -1,19 +1,23 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from redis.exceptions import RedisError
-from datetime import datetime, timezone, timedelta
 
 from app.modules.order.tasks import (
     validate_event_data,
     process_single_outbox_event,
-    update_outbox_event,
     claim_process_events,
+    process_outbox_updates,
     process_outbox_event,
     MAX_OUTBOX_RETRIES,
+    LOCK_TIMEOUT_MINUTES,
 )
-from app.modules.order.execptions import InvalidOutboxPayload
-from app.modules.order.models import OutBoxOrderEvent, EventStatus
+from app.modules.order.exceptions import InvalidOutboxPayload
+from app.modules.order.models import EventStatus
 
+
+# =====================================================================
+# Validation Unit Tests
+# =====================================================================
 
 def test_validate_event_data_valid():
     data = {"amount": 1500000, "trace_id": "tx_123"}
@@ -55,167 +59,293 @@ def test_validate_event_data_amount_non_positive():
         validate_event_data({"amount": -500})
 
 
+# =====================================================================
+# process_single_outbox_event Unit Tests
+# =====================================================================
+
 @pytest.mark.asyncio
-async def test_process_single_outbox_event_success(mocker, fake_redis):
-    mocker_update = mocker.patch("app.modules.order.tasks.update_outbox_event", new_callable=AsyncMock)
+async def test_process_single_outbox_event_success():
+    mock_queue = AsyncMock()
     event = {
         "id": 101,
         "data": {"amount": 1510000, "trace_id": "tr_1"},
-        "retry_count": 0
+        "retry_count": 0,
     }
 
-    await process_single_outbox_event(fake_redis, event)
+    result = await process_single_outbox_event(mock_queue, event)
 
-    # Queue should contain the message
-    stream_len = await fake_redis.xlen("pending_orders_queue")
-    assert stream_len == 1
-
-    # Should update event to PUBLISHED
-    mocker_update.assert_awaited_once_with(
-        101,
-        status=EventStatus.PUBLISHED,
-        last_error=None
-    )
+    mock_queue.enqueue.assert_awaited_once_with({"amount": 1510000, "trace_id": "tr_1"})
+    assert result == {
+        "id": 101,
+        "status": EventStatus.PUBLISHED,
+        "retry_count": 0,
+        "last_error": None,
+    }
 
 
 @pytest.mark.asyncio
-async def test_process_single_outbox_event_invalid_payload(mocker, fake_redis):
-    mocker_update = mocker.patch("app.modules.order.tasks.update_outbox_event", new_callable=AsyncMock)
+async def test_process_single_outbox_event_none_retry_count():
+    mock_queue = AsyncMock()
     event = {
         "id": 102,
-        "data": {"amount": -10},  # Invalid payload
-        "retry_count": 0
+        "data": {"amount": 1510000},
+        "retry_count": None,
     }
 
-    await process_single_outbox_event(fake_redis, event)
+    result = await process_single_outbox_event(mock_queue, event)
 
-    # Message should be sent to dead letter stream
-    dlq_len = await fake_redis.xlen("pending_orders_queue:dead")
-    assert dlq_len == 1
-
-    # Should update event to FAILED
-    mocker_update.assert_awaited_once()
-    call_args = mocker_update.await_args.kwargs
-    assert call_args["status"] == EventStatus.FAILED
-    assert "Amount must be positive" in call_args["last_error"]
+    mock_queue.enqueue.assert_awaited_once()
+    assert result["retry_count"] == 0
+    assert result["status"] == EventStatus.PUBLISHED
 
 
 @pytest.mark.asyncio
-async def test_process_single_outbox_event_redis_error_retry(mocker, fake_redis):
-    mocker_update = mocker.patch("app.modules.order.tasks.update_outbox_event", new_callable=AsyncMock)
-    mocker.patch("app.modules.order.queue_manager.MessageQueue.enqueue", side_effect=RedisError("Redis down"))
-
+async def test_process_single_outbox_event_invalid_payload_dlq_success():
+    mock_queue = AsyncMock()
     event = {
         "id": 103,
-        "data": {"amount": 1520000},
-        "retry_count": 1
+        "data": {"amount": -10},
+        "retry_count": 0,
     }
 
-    await process_single_outbox_event(fake_redis, event)
+    result = await process_single_outbox_event(mock_queue, event)
 
-    # Should stay PENDING with incremented retry_count
-    mocker_update.assert_awaited_once_with(
-        103,
-        status=EventStatus.PENDING,
-        retry_count=2,
-        last_error="Redis down"
+    mock_queue.enqueue_dead_letter.assert_awaited_once_with(
+        data={"amount": -10},
+        event_id=103,
+        reason="Amount must be positive",
     )
+    assert result == {
+        "id": 103,
+        "status": EventStatus.FAILED,
+        "retry_count": 0,
+        "last_error": "Amount must be positive",
+    }
 
 
 @pytest.mark.asyncio
-async def test_process_single_outbox_event_redis_error_max_retries(mocker, fake_redis):
-    mocker_update = mocker.patch("app.modules.order.tasks.update_outbox_event", new_callable=AsyncMock)
-    mocker.patch("app.modules.order.queue_manager.MessageQueue.enqueue", side_effect=RedisError("Redis still down"))
-
+async def test_process_single_outbox_event_invalid_payload_dlq_redis_error_retry():
+    mock_queue = AsyncMock()
+    mock_queue.enqueue_dead_letter.side_effect = RedisError("DLQ failure")
     event = {
         "id": 104,
-        "data": {"amount": 1520000},
-        "retry_count": MAX_OUTBOX_RETRIES - 1  # 4 attempts -> next is 5 >= MAX
+        "data": {"amount": -10},
+        "retry_count": 1,
     }
 
-    await process_single_outbox_event(fake_redis, event)
+    result = await process_single_outbox_event(mock_queue, event)
 
-    # Should transition to FAILED
-    mocker_update.assert_awaited_once()
-    call_args = mocker_update.await_args.kwargs
-    assert call_args["status"] == EventStatus.FAILED
-    assert call_args["retry_count"] == MAX_OUTBOX_RETRIES
-    assert "Max retries" in call_args["last_error"]
+    assert result["status"] == EventStatus.PENDING
+    assert result["retry_count"] == 2
+    assert "DLQ Redis error" in result["last_error"]
 
 
 @pytest.mark.asyncio
-async def test_claim_process_events(mocker):
-    fake_event = OutBoxOrderEvent(
-        id=7,
-        status=EventStatus.PENDING,
-        data={"amount": 1530000},
-        retry_count=0
-    )
-    mock_session = AsyncMock()
+async def test_process_single_outbox_event_invalid_payload_dlq_redis_error_max_retries():
+    mock_queue = AsyncMock()
+    mock_queue.enqueue_dead_letter.side_effect = RedisError("DLQ failure")
+    event = {
+        "id": 105,
+        "data": {"amount": -10},
+        "retry_count": MAX_OUTBOX_RETRIES - 1,
+    }
+
+    result = await process_single_outbox_event(mock_queue, event)
+
+    assert result["status"] == EventStatus.FAILED
+    assert result["retry_count"] == MAX_OUTBOX_RETRIES
+    assert "DLQ Redis error after max retries" in result["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_process_single_outbox_event_redis_error_retry():
+    mock_queue = AsyncMock()
+    mock_queue.enqueue.side_effect = RedisError("Redis connection lost")
+    event = {
+        "id": 106,
+        "data": {"amount": 1520000},
+        "retry_count": 1,
+    }
+
+    result = await process_single_outbox_event(mock_queue, event)
+
+    assert result == {
+        "id": 106,
+        "status": EventStatus.PENDING,
+        "retry_count": 2,
+        "last_error": "Redis connection lost",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_single_outbox_event_redis_error_max_retries():
+    mock_queue = AsyncMock()
+    mock_queue.enqueue.side_effect = RedisError("Redis connection lost")
+    event = {
+        "id": 107,
+        "data": {"amount": 1520000},
+        "retry_count": MAX_OUTBOX_RETRIES - 1,
+    }
+
+    result = await process_single_outbox_event(mock_queue, event)
+
+    assert result["status"] == EventStatus.FAILED
+    assert result["retry_count"] == MAX_OUTBOX_RETRIES
+    assert f"Max retries ({MAX_OUTBOX_RETRIES}) reached" in result["last_error"]
+
+
+# =====================================================================
+# claim_process_events Unit Tests
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_claim_process_events():
+    mock_session = MagicMock()
+    mock_session.begin.return_value.__aenter__ = AsyncMock()
+    mock_session.begin.return_value.__aexit__ = AsyncMock()
+
+    mock_row_1 = MagicMock()
+    mock_row_1._mapping = {"id": 1, "data": {"amount": 1000}, "retry_count": 0}
+    mock_row_2 = MagicMock()
+    mock_row_2._mapping = {"id": 2, "data": {"amount": 2000}, "retry_count": 1}
+
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [fake_event]
-    mock_session.execute.return_value = mock_result
+    mock_result.all.return_value = [mock_row_1, mock_row_2]
+    mock_session.execute = AsyncMock(return_value=mock_result)
 
-    # Mock session.begin() as an async context manager
-    mock_session.begin = MagicMock()
-    mock_session.begin.return_value.__aenter__ = AsyncMock()
-    mock_session.begin.return_value.__aexit__ = AsyncMock()
+    claimed = await claim_process_events(mock_session, limit_s=50)
 
-    mock_session_local = MagicMock()
-    mock_session_local.return_value.__aenter__.return_value = mock_session
-    mock_session_local.return_value.__aexit__ = AsyncMock()
+    assert len(claimed) == 2
+    assert claimed[0]["id"] == 1
+    assert claimed[0]["data"]["amount"] == 1000
+    assert claimed[1]["id"] == 2
+    mock_session.execute.assert_awaited_once()
 
-    mocker.patch("app.modules.order.tasks.SessionLocal", mock_session_local)
 
-    events = await claim_process_events(limit_s=10)
+# =====================================================================
+# process_outbox_updates Unit Tests
+# =====================================================================
 
-    assert len(events) == 1
-    assert events[0]["id"] == 7
-    assert events[0]["data"]["amount"] == 1530000
-    assert fake_event.status == EventStatus.PROCESSING
-    assert fake_event.locked_at is not None
+@pytest.mark.asyncio
+async def test_process_outbox_updates_empty():
+    mock_session = MagicMock()
+    mock_session.execute = AsyncMock()
+    await process_outbox_updates(mock_session, [])
+    mock_session.execute.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_update_outbox_event(mocker):
-    fake_event = OutBoxOrderEvent(id=1, status=EventStatus.PROCESSING)
-    mock_session = AsyncMock()
-    mock_session.get.return_value = fake_event
-
-    mock_session.begin = MagicMock()
+async def test_process_outbox_updates_published_only():
+    mock_session = MagicMock()
     mock_session.begin.return_value.__aenter__ = AsyncMock()
     mock_session.begin.return_value.__aexit__ = AsyncMock()
+    mock_session.execute = AsyncMock()
 
-    mock_session_local = MagicMock()
-    mock_session_local.return_value.__aenter__.return_value = mock_session
-    mock_session_local.return_value.__aexit__ = AsyncMock()
-    mocker.patch("app.modules.order.tasks.SessionLocal", mock_session_local)
+    updates = [
+        {"id": 1, "status": EventStatus.PUBLISHED, "retry_count": 0, "last_error": None},
+        {"id": 2, "status": EventStatus.PUBLISHED, "retry_count": 0, "last_error": None},
+    ]
 
-    await update_outbox_event(
-        1,
-        status=EventStatus.PUBLISHED,
-        retry_count=2,
-        last_error="test_error"
+    await process_outbox_updates(mock_session, updates)
+
+    assert mock_session.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_outbox_updates_errors_only():
+    mock_session = MagicMock()
+    mock_session.begin.return_value.__aenter__ = AsyncMock()
+    mock_session.begin.return_value.__aexit__ = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    updates = [
+        {"id": 10, "status": EventStatus.PENDING, "retry_count": 2, "last_error": "err1"},
+        {"id": 20, "status": EventStatus.FAILED, "retry_count": 5, "last_error": "err2"},
+    ]
+
+    await process_outbox_updates(mock_session, updates)
+
+    assert mock_session.execute.await_count == 1
+    call_args = mock_session.execute.await_args[0]
+    # Verify parameter list passed to batch update
+    assert call_args[1] == updates
+
+
+@pytest.mark.asyncio
+async def test_process_outbox_updates_mixed():
+    mock_session = MagicMock()
+    mock_session.begin.return_value.__aenter__ = AsyncMock()
+    mock_session.begin.return_value.__aexit__ = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    updates = [
+        {"id": 1, "status": EventStatus.PUBLISHED, "retry_count": 0, "last_error": None},
+        {"id": 2, "status": EventStatus.FAILED, "retry_count": 5, "last_error": "Invalid"},
+    ]
+
+    await process_outbox_updates(mock_session, updates)
+
+    assert mock_session.execute.await_count == 2
+
+
+# =====================================================================
+# process_outbox_event Orchestration Unit Tests
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_process_outbox_event_no_events(mocker):
+    mock_redis = AsyncMock()
+    mocker.patch(
+        "app.modules.order.tasks.claim_process_events",
+        new_callable=AsyncMock,
+        return_value=[],
     )
 
-    assert fake_event.status == EventStatus.PUBLISHED
-    assert fake_event.retry_count == 2
-    assert fake_event.last_error == "test_error"
+    mock_session = AsyncMock()
+    mock_get_session = MagicMock()
+    mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_get_session.return_value.__aexit__ = AsyncMock()
+    mocker.patch("app.modules.order.tasks.get_session", mock_get_session)
+
+    count = await process_outbox_event(mock_redis)
+
+    assert count == 0
 
 
 @pytest.mark.asyncio
-async def test_update_outbox_event_not_found(mocker):
+async def test_process_outbox_event_success_flow(mocker):
+    mock_redis = AsyncMock()
+    events = [
+        {"id": 1, "data": {"amount": 1000}, "retry_count": 0},
+        {"id": 2, "data": {"amount": 2000}, "retry_count": 0},
+    ]
+
+    mocker.patch(
+        "app.modules.order.tasks.claim_process_events",
+        new_callable=AsyncMock,
+        return_value=events,
+    )
+
+    update_1 = {"id": 1, "status": EventStatus.PUBLISHED, "retry_count": 0, "last_error": None}
+    update_2 = {"id": 2, "status": EventStatus.PUBLISHED, "retry_count": 0, "last_error": None}
+    mocker.patch(
+        "app.modules.order.tasks.process_single_outbox_event",
+        new_callable=AsyncMock,
+        side_effect=[update_1, update_2],
+    )
+
+    mock_updates = mocker.patch(
+        "app.modules.order.tasks.process_outbox_updates",
+        new_callable=AsyncMock,
+    )
+
     mock_session = AsyncMock()
-    mock_session.get.return_value = None
+    mock_get_session = MagicMock()
+    mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_get_session.return_value.__aexit__ = AsyncMock()
+    mocker.patch("app.modules.order.tasks.get_session", mock_get_session)
 
-    mock_session.begin = MagicMock()
-    mock_session.begin.return_value.__aenter__ = AsyncMock()
-    mock_session.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    count = await process_outbox_event(mock_redis)
 
-    mock_session_local = MagicMock()
-    mock_session_local.return_value.__aenter__.return_value = mock_session
-    mock_session_local.return_value.__aexit__ = AsyncMock(return_value=False)
-    mocker.patch("app.modules.order.tasks.SessionLocal", mock_session_local)
-
-    with pytest.raises(LookupError, match="Outbox event not found: 999"):
-        await update_outbox_event(999, status=EventStatus.FAILED)
+    assert count == 2
+    mock_updates.assert_awaited_once_with(mock_session, [update_1, update_2])

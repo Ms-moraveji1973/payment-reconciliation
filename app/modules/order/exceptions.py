@@ -133,3 +133,9 @@ class CriticalRejectMessage(WorkerException):
 
     def __init__(self, message: str = "Message critically rejected"):
         super().__init__(message)
+
+
+class DuplicatePaymentTransactionError(EntityAlreadyExistsError):
+    """Raised when an SMS transaction ID has already been attached to a payment."""
+    def __init__(self, message: str = "This SMS transaction has already been processed"):
+        super().__init__(message)

@@ -24,6 +24,7 @@ from .exceptions import (
     InvalidSMSDataError,
     DuplicateSMSTransactionError,
     DuplicateOutboxEventError,
+    DuplicatePaymentTransactionError
 )
 
 
@@ -150,16 +151,27 @@ async def get_unique_amount_from_postgres(session: AsyncSession):
 
 
 
-async def process_pending_payment(amount:int, session: AsyncSession):
+async def process_pending_payment(amount:int, sms_transaction_id: int, session: AsyncSession):
+    if not sms_transaction_id:
+        raise InvalidSMSDataError("transaction_id is required for payment processing")
+
+    existing_stmt = select(PaymentIntent).where(PaymentIntent.sms_transaction_id == sms_transaction_id)
+    existing_result = await session.execute(existing_stmt)
+    already_processed = existing_result.scalar_one_or_none()
+    if already_processed :
+        log.info(f"SMS {sms_transaction_id} was already processed for order {already_processed.order_id}. Skipping.")
+        return already_processed, False
+
     stmt = select(PaymentIntent).with_for_update(nowait=False).options(joinedload(PaymentIntent.order, innerjoin=True)).where(PaymentIntent.exact_amount == amount, PaymentIntent.status == OrderStatus.PENDING)
     payment_result = await session.execute(stmt)
     try:
         payment = payment_result.scalar_one()
         payment.status = OrderStatus.PAID
         payment.order.status = OrderStatus.PAID
+        payment.sms_transaction_id = sms_transaction_id
         await session.flush()
         log.info("the transaction amount has been found and changed the status to PAID",status="transaction_found")
-        return payment
+        return payment, True
 
     except NoResultFound as exc:
         raise PaymentIntentNotFoundError(f"Payment intent for amount {amount} not found") from exc
@@ -167,6 +179,9 @@ async def process_pending_payment(amount:int, session: AsyncSession):
     except MultipleResultsFound as exc:
         raise DuplicatePaymentIntentError(f"Multiple payment intents found for amount {amount}") from exc
 
+    except IntegrityError as exc:
+        log.warning(f"Integrity conflict on SMS {sms_transaction_id}: already processed concurrently.")
+        raise DuplicatePaymentTransactionError(f"SMS {sms_transaction_id} was processed concurrently") from exc
 
 async def create_transaction_service(sms_data: dict, session:AsyncSession):
     amount = sms_data.get("sms_amount")
@@ -205,6 +220,7 @@ async def handle_transaction_service(sms_data: dict, session:AsyncSession, redis
         trace_id = sms_data["trace_id"]
         transaction_id = transaction.id
         transaction_data = {
+            "transaction_id": transaction_id,
             "trace_id":trace_id,
             "amount":amount,
             "type":"payment"

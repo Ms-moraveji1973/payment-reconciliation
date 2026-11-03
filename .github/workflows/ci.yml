@@ -1,0 +1,122 @@
+name: CI Pipeline
+
+'on':
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.gitignore'
+      - 'LICENSE'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Syntax & Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://dummy:dummy@localhost:5432/dummy
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      TOKEN_VERIFICATION: ${{ secrets.CI_TOKEN_VERIFICATION || 'ci-test-token-verification-val' }}
+      SECRET_ACCESS_KEY: ${{ secrets.CI_SECRET_ACCESS_KEY || 'ci-test-secret-access-key-32chars-min' }}
+      SECRET_REFRESH_KEY: ${{ secrets.CI_SECRET_REFRESH_KEY || 'ci-test-secret-refresh-key-32chars-min' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Python Syntax
+        run: |
+          python -m py_compile $(find app tests -name "*.py")
+
+      - name: Run Unit Tests
+        run: |
+          pytest tests/unit -v
+
+  integration-tests:
+    name: Integration Tests (PostgreSQL & Redis)
+    needs: [unit-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ${{ vars.CI_POSTGRES_USER || 'payment_test_user' }}
+          POSTGRES_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD || 'payment_test_password' }}
+          POSTGRES_DB: ${{ vars.CI_POSTGRES_DB || 'payment_test' }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://${{ vars.CI_POSTGRES_USER || 'payment_test_user' }}:${{ secrets.CI_POSTGRES_PASSWORD || 'payment_test_password' }}@localhost:5432/${{ vars.CI_POSTGRES_DB || 'payment_test' }}
+      DATABASE_URL: postgresql+asyncpg://${{ vars.CI_POSTGRES_USER || 'payment_test_user' }}:${{ secrets.CI_POSTGRES_PASSWORD || 'payment_test_password' }}@localhost:5432/${{ vars.CI_POSTGRES_DB || 'payment_test' }}
+      TEST_REDIS_HOST: localhost
+      TEST_REDIS_PORT: 6379
+      TEST_REDIS_DB: 9
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      TOKEN_VERIFICATION: ${{ secrets.CI_TOKEN_VERIFICATION || 'ci-test-token-verification-val' }}
+      SECRET_ACCESS_KEY: ${{ secrets.CI_SECRET_ACCESS_KEY || 'ci-test-secret-access-key-32chars-min' }}
+      SECRET_REFRESH_KEY: ${{ secrets.CI_SECRET_REFRESH_KEY || 'ci-test-secret-refresh-key-32chars-min' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Integration Tests
+        run: |
+          pytest tests/integration -v

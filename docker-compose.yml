@@ -28,5 +28,15 @@ services:
       - postgres
       - redis
 
+  worker:
+    build: .
+    container_name: payment_worker_docker
+    command: python -m app.worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+
 volumes:
   postgres_data:

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+node_modules/
+postgres_data/
+data/
+*.log
+.env
